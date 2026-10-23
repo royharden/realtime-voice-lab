@@ -1,0 +1,10 @@
+{
+  "name": "realtime-voice-lab-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix web run dev -- --host 127.0.0.1",
+    "build": "npm --prefix web run build",
+    "typecheck": "npm --prefix web run typecheck"
+  }
+}
