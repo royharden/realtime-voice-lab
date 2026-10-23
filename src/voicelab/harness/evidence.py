@@ -1,0 +1,65 @@
+"""Append raw driver observations; canonical metrics remain owned by evaluation."""
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from pathlib import Path
+
+
+def canonical(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
+
+
+class EvidenceSink:
+    def __init__(self, root: Path, spec: dict):
+        # Never mix a previous run's observations or silently overwrite artifacts.
+        root.mkdir(parents=True, exist_ok=False)
+        self.root, self.run_id = root, spec['run_id']
+        self.handle = (root / 'driver.jsonl').open('xb')
+        self.sequence = 0
+        self.spec_hash = spec['_manifest_hash']
+        self.counts: dict[str, int] = {}
+        self.closed = False
+
+    def emit(self, kind: str, *, observation: str = 'observed', **fields: object) -> None:
+        if self.closed or self.sequence >= (100_000 if kind == 'driver_ended' else 99_999):
+            raise ValueError('driver evidence closed or bounded event capacity exhausted')
+        if observation not in {'observed', 'estimated', 'unknown'}:
+            raise ValueError('invalid observation status')
+        row = {'schema_version': 1, 'kind': kind, 'run_id': self.run_id,
+               'sequence': self.sequence, 'timestamp': time.monotonic_ns(),
+               'clock_domain': 'driver_monotonic_ns', 'observation': observation,
+               'mode': 'mock', 'split': 'dev', **fields}
+        self.handle.write(canonical(row))
+        self.handle.flush()
+        self.sequence += 1
+        self.counts[kind] = self.counts.get(kind, 0) + 1
+
+    def artifact(self, name: str, value: object, kind: str) -> dict:
+        return self.bytes_artifact(name, canonical(value), kind)
+
+    def bytes_artifact(self, name: str, raw: bytes, kind: str) -> dict:
+        if Path(name).name != name:
+            raise ValueError('flat owned output name required')
+        with (self.root / name).open('xb') as handle:
+            handle.write(raw)
+        return {'path': name, 'kind': kind, 'sha256': hashlib.sha256(raw).hexdigest()}
+
+    def close(self, *, completed: bool, reason: str, references: dict | None = None) -> None:
+        if self.closed:
+            return
+        self.emit('driver_ended', completed=completed, reason=reason)
+        self.handle.close()
+        self.closed = True
+        raw = (self.root / 'driver.jsonl').read_bytes()
+        self.artifact('handoff.json', {
+            'schema_version': 1, 'run_id': self.run_id, 'manifest_hash': self.spec_hash,
+            'evidence_label': 'development mock observations; no independent acceptance',
+            'driver_completed': completed, 'counts': self.counts,
+            'references': {'driver': {'path': 'driver.jsonl', 'kind': 'driver_observations',
+                           'sha256': hashlib.sha256(raw).hexdigest()}, **(references or {})},
+            'spoken_correctness': 'unknown', 'acoustic_latency': 'unknown',
+            'heldout_release': False, 'product_acceptance': False,
+            'missing_evidence_is_failure_or_unknown': True,
+        }, 'driver_handoff')

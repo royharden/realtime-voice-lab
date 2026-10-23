@@ -1,0 +1,22 @@
+{
+  "runtime_authorized": false,
+  "activation_reference": "REQUIRES_LATER_OPERATOR_AUTHORIZATION",
+  "run_id": "dev-operator-chosen",
+  "mode": "mock",
+  "split": "dev",
+  "frontend_url": "http://127.0.0.1:REPLACE_WITH_CLAIMED_PORT/",
+  "relay_url": "ws://127.0.0.1:REPLACE_WITH_CLAIMED_PORT/ws",
+  "code_hash": "REPLACE_WITH_ACTUAL_CANDIDATE_SHA256",
+  "config_hash": "REPLACE_WITH_ACTUAL_CONFIG_SHA256",
+  "fixture_root": "REPLACE_WITH_OWN_GENERATED_DEVELOPMENT_DIRECTORY",
+  "fixture_manifest": "manifest.json",
+  "relay_artifact_root": "REPLACE_WITH_THIS_RUNS_OWN_RELAY_ARTIFACT_ROOT",
+  "include_required_faults": true,
+  "task_fixtures": {},
+  "mock_fault_policy": {"seed": 0, "authorization_reference": "REPLACE_WITH_SAME_RELAY_OPERATOR_POLICY_REFERENCE"},
+  "driver_deadline_seconds": 1900,
+  "port_claims": [
+    {"port": 0, "receipt": "REPLACE_FRONTEND_CLAIM", "operator_check_reference": "REPLACE"},
+    {"port": 0, "receipt": "REPLACE_RELAY_CLAIM", "operator_check_reference": "REPLACE"}
+  ]
+}
