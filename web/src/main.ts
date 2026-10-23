@@ -4,6 +4,10 @@ import type {ResampledBlock} from './audio';
 import {OwnedResources} from './resources';
 import {ClockAlignment} from './clock';
 import {mountReviewWorkbench} from './review-workbench';
+import {mountReplayInspector} from './replay-inspector';
+import {clientWire,serverWire,isArm} from './boundary';
+import {CONSTANTS} from './generated/contracts';
+import type {ClientMessage,Hello,ServerMessage,ClientStatus} from './generated/contracts';
 type State = 'idle'|'requesting_permission'|'connecting'|'listening'|'awaiting_response'|'playing'|'interrupting'|'disconnected'|'reconnecting'|'ending'|'closed'|'permission_denied'|'device_lost'|'silence_timeout'|'unsupported_audio'|'device_muted'|'recovery_unknown'|'calibrating'|'failed';
 type Wire = Record<string, unknown> & {type:string};
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -17,10 +21,11 @@ app.innerHTML = `<header><a class="brand" href="#">◉ <span>VOICE LAB</span></a
 <details><summary>Mock typed stimulus · diagnostic only</summary><p>Typed input bypasses speech interpretation and cannot pass speech adjudication.</p><form id="stimulus"><input id="text" aria-label="Mock typed stimulus" placeholder="Ask opening hours or available slots"><button>Send diagnostic turn</button></form></details>
 <div class="section-head"><h3>Conversation</h3><span>Fictional service · English</span></div><div id="conversation" class="conversation"><p class="empty">Transcripts and explicit responses appear here.</p></div></section>
 <aside><section class="card"><p class="eyebrow">AUTHORITATIVE EFFECT</p><h2>Task journal</h2><pre id="task">No task event received.</pre><h3>Session outcome and evidence</h3><pre id="terminal">No terminal observation.</pre><p class="muted">An interruption does not undo a committed booking. The relay journal owns the effect.</p></section><section class="card"><p class="eyebrow">MEASUREMENT BOUNDARY</p><h2>Timing inspector</h2><dl><dt>Context sample rate</dt><dd id="rate">Unknown</dd><dt>Wire PCM</dt><dd>24,000 Hz · mono PCM16</dd><dt>Render boundary</dt><dd>Output timestamp estimate</dd><dt>Acoustic calibration</dt><dd>Unmeasured</dd><dt>Latency / p50 / p95</dt><dd>Not evaluated</dd></dl><pre id="timing">No rendered sample observed.</pre></section><section class="card"><p class="eyebrow">ALL ATTEMPTS</p><h2>Cost & completeness</h2><pre id="cost">Unknown until relay accounting arrives.</pre><p class="muted">Mock is not a live price or billing certification.</p></section></aside></div>
-<section class="card trace"><div class="section-head"><div><p class="eyebrow">BROWSER PERFORMANCE CLOCK · MILLISECONDS</p><h2>Lifecycle trace</h2></div><button id="download">Export local trace</button></div><p class="muted">Receipt, endpoint decision, commit, worklet fence and rendered ACK are separate events. Safe export retains up to 1,000 metadata events with explicit sequence gaps. No raw audio, transcripts or nonce are exported.</p><div id="trace" role="log" aria-live="off"></div></section><section id="review-workbench"></section><footer>V / C / K compare pinned pipelines. No arm is presumed faster. Live requires separately authorized relay admission; no live execution is established.</footer></main>`;
+<section class="card trace"><div class="section-head"><div><p class="eyebrow">BROWSER PERFORMANCE CLOCK · MILLISECONDS</p><h2>Lifecycle trace</h2></div><button id="download">Export local trace</button></div><p class="muted">Receipt, endpoint decision, commit, worklet fence and rendered ACK are separate events. Safe export retains up to 1,000 metadata events with explicit sequence gaps. No raw audio, transcripts or nonce are exported.</p><div id="trace" role="log" aria-live="off"></div></section><section id="review-workbench"></section><section id="replay-inspector"></section><footer>V / C / K compare pinned pipelines. No arm is presumed faster. Live requires separately authorized relay admission; no live execution is established.</footer></main>`;
 const el = <T extends HTMLElement = HTMLElement>(id:string) => document.getElementById(id) as T;
 let mode:'mock'|'live'='mock';
-type ClientOutcome='permission_denied'|'device_lost'|'silence_timeout'|'abandoned'|'unsupported_audio';
+let replayRefresh:()=>void=()=>{};
+type ClientOutcome=ClientStatus['outcome'];
 let resources:OwnedResources|undefined;const ownedScopes=new Set<OwnedResources>();
 let admitted=false,awaitingResume=false,repeatRequests=0,taskDeadline=0,connectionReady=false;
 let silenceTimer:ReturnType<typeof setTimeout>|undefined,sessionTimer:ReturnType<typeof setTimeout>|undefined,
@@ -60,7 +65,7 @@ function updateControls(){
 function clearTimer(id:ReturnType<typeof setTimeout>|undefined){resources?.clearTimer(id);}
 
 let retainedSession:string|undefined, disconnectedAt=0, reconnects=0, resuming=false;
-let state:State='idle', arm='V', socket:WebSocket|undefined, context:AudioContext|undefined, stream:MediaStream|undefined, node:AudioWorkletNode|undefined, source:MediaStreamAudioSourceNode|undefined;
+let state:State='idle', arm:Hello['arm']='V', socket:WebSocket|undefined, context:AudioContext|undefined, stream:MediaStream|undefined, node:AudioWorkletNode|undefined, source:MediaStreamAudioSourceNode|undefined;
 let captureResampler:Resampler|undefined, playbackResampler:Resampler|undefined;
 let connection=0, epoch=0, turn=0, transportCounter=0,currentTransportTurn:string|undefined,sequence=0, token=0, activeResponse:string|undefined, responseSamples=0, expectedSequence=-1;
 let lastVoice=0, voiced=false, captureBaseFrame:number|undefined, captureLead:Float32Array[]=[], leadFrames=0, playbackDone=false, playbackQueued=0,
@@ -94,7 +99,7 @@ function diagnosticTrace(at:number,kind:string,raw:unknown){
 const traces:{at:number;kind:string;detail:unknown}[]=[];
 function trace(kind:string, detail:unknown={}) { const item={at:performance.now(),kind,detail}; diagnosticTrace(item.at,kind,detail);traces.push(item); if(traces.length>500)traces.shift(); const row=document.createElement('div'); row.textContent=`${item.at.toFixed(1).padStart(10)}  ${kind}  ${JSON.stringify(detail)}`; el('trace').prepend(row); while(el('trace').children.length>100)el('trace').lastElementChild?.remove(); }
 function setState(next:State, detail='') {state=next; el('state').textContent=next; el('headline').textContent=next.replaceAll('_',' '); el('detail').textContent=detail; el('mic').classList.toggle('live',ownedHandles().media_tracks>0); trace('state',{next,detail});updateControls();}
-function send(message:Wire) {if(socket?.readyState!==WebSocket.OPEN)throw new Error('Transport is not open');const encoded=JSON.stringify(message);if(socket.bufferedAmount+new TextEncoder().encode(encoded).byteLength>128000)throw new Error('Upload queue exceeds two-second PCM envelope');socket.send(encoded);}
+function send(message:ClientMessage) {if(socket?.readyState!==WebSocket.OPEN)throw new Error('Transport is not open');const encoded=JSON.stringify(clientWire(message));if(new TextEncoder().encode(encoded).byteLength>CONSTANTS.MAX_MESSAGE_BYTES)throw new Error('Client message exceeds canonical byte bound');if(socket.bufferedAmount+new TextEncoder().encode(encoded).byteLength>128000)throw new Error('Upload queue exceeds two-second PCM envelope');socket.send(encoded);}
 function stopCapture(){node?.port.postMessage({type:'capture',enabled:false});clearTimer(silenceTimer);silenceTimer=undefined;}
 function fence(){epoch++;playbackQueued=0;node?.port.postMessage({type:'fence',epoch,connection});activeResponse=undefined;responseSamples=0;expectedSequence=-1;playbackResampler=context?new Resampler(24000,context.sampleRate):undefined;trace('cancel_fence_dispatched',{epoch,connection});}
 function releaseAudio(){
@@ -153,7 +158,7 @@ function interrupt(){
   pendingCancel={responseId,epoch:epoch+1,minimumCutoff:cancelAck&&cancelAck.response_id===responseId?cancelAck.rendered_through_sample:0};fence();fenceTimer=resources!.timer(()=>fail('audio_failure','Worklet fence acknowledgement timed out.'),1000);
 }
 function conversation(text:string,kind:string){const row=document.createElement('p');row.className=kind;row.textContent=text;el('conversation').querySelector('.empty')?.remove();el('conversation').append(row);while(el('conversation').children.length>100)el('conversation').firstElementChild?.remove();}
-function receive(raw:string){if(raw.length>300000)throw new Error('Message bound exceeded');const envelope=JSON.parse(raw) as Wire;if(!envelope||typeof envelope.type!=='string'||envelope.protocol_version!==1||!envelope.payload||typeof envelope.payload!=='object')throw new Error('Malformed protocol');const m={...envelope,...(envelope.payload as Record<string,unknown>)} as Wire;trace('relay_'+m.type,m.type==='audio'?{sequence:m.sequence,response_id:m.response_id}:m);
+function receive(raw:string){if(raw.length>300000)throw new Error('Message bound exceeded');const envelope:ServerMessage=serverWire(raw);if(!envelope||typeof envelope.type!=='string'||envelope.protocol_version!==1||!envelope.payload||typeof envelope.payload!=='object')throw new Error('Malformed protocol');const m={...envelope,...(envelope.payload as Record<string,unknown>)} as Wire;trace('relay_'+m.type,m.type==='audio'?{sequence:m.sequence,response_id:m.response_id}:m);
   if(m.type==='ready'){
     if(connectionReady||m.mode!==mode||m.arm!==arm||typeof m.session_id!=='string'||!Number.isSafeInteger(m.connection_epoch)||!Number.isSafeInteger(m.response_epoch))throw new Error('Invalid or duplicate relay admission');
     clearTimer(connectTimer);connectionReady=true;admitted=true;
@@ -189,7 +194,7 @@ function receive(raw:string){if(raw.length>300000)throw new Error('Message bound
     if(m.sample_rate!==24000||typeof m.response_id!=='string'||typeof m.pcm16!=='string'||!Number.isInteger(m.sequence))throw new Error('Invalid audio contract');
     if(activeResponse&&activeResponse!==m.response_id)throw new Error('Concurrent response refused');
     if(Number(m.sequence)<=expectedSequence)throw new Error('Duplicate or reordered audio sequence');if(expectedSequence>=0&&Number(m.sequence)!==expectedSequence+1)trace('audio_sequence_gap',{previous:expectedSequence,current:m.sequence});expectedSequence=Number(m.sequence);
-    if(activeResponse!==m.response_id){lastAck=undefined;playbackDone=false;playbackResampler=new Resampler(24000,context!.sampleRate);}if(playbackDone)throw new Error('Audio after response completion');activeResponse=m.response_id;const pcm=decodePCM(m.pcm16);trace('first_or_next_receipt',{response_id:activeResponse,source_start:responseSamples,receipt_ms:performance.now(),clock_domain:'browser_performance_ms'});queuePlayback(playbackResampler!.push(pcm));responseSamples+=pcm.length;setState('playing',`${mode==='mock'?'Diagnostic mock':'Unverified live'} playback. Microphone monitors sustained onset for interruption; Interrupt is also available.`);node?.port.postMessage({type:'capture',enabled:true});
+    if(activeResponse!==m.response_id){lastAck=undefined;playbackDone=false;playbackResampler=new Resampler(24000,context!.sampleRate);}if(playbackDone)throw new Error('Audio after response completion');activeResponse=m.response_id;const pcm=decodePCM(m.pcm16);if(!pcm.length||pcm.length>CONSTANTS.MAX_FRAME_SAMPLES)throw new Error('Invalid canonical PCM frame bound');trace('first_or_next_receipt',{response_id:activeResponse,source_start:responseSamples,receipt_ms:performance.now(),clock_domain:'browser_performance_ms'});queuePlayback(playbackResampler!.push(pcm));responseSamples+=pcm.length;setState('playing',`${mode==='mock'?'Diagnostic mock':'Unverified live'} playback. Microphone monitors sustained onset for interruption; Interrupt is also available.`);node?.port.postMessage({type:'capture',enabled:true});
   }
 }
 function beginAlignment(){if(connection===clockEpoch)nextClockProbe();}
@@ -266,7 +271,7 @@ async function start(){
     const url=new URL(el<HTMLInputElement>('url').value);
     if(!['127.0.0.1','localhost','[::1]'].includes(url.hostname)||!['ws:','wss:'].includes(url.protocol)||!url.port||url.username||url.password)throw new Error('Enter a registered loopback relay URL with an explicit port');
     if(mode==='live'&&!el<HTMLInputElement>('live-consent').checked)throw new Error('Live requires explicit acknowledgement and separately authorized relay admission');
-    const nonce=el<HTMLInputElement>('nonce').value;if(!nonce)throw new Error('Enter the local relay nonce');
+    const nonce=el<HTMLInputElement>('nonce').value;clientWire({type:'hello',protocol_version:CONSTANTS.PROTOCOL_VERSION,mode,arm,nonce});
     if(!navigator.mediaDevices?.getUserMedia||typeof AudioContext==='undefined'||typeof AudioWorkletNode==='undefined'){fail('unsupported_audio','This browser lacks the required microphone/AudioWorklet APIs.');return;}
     clearTimer(sessionTimer);sessionTimer=scope.timer(()=>fail('task_deadline','Original 120-second task deadline expired.'),Math.max(1,taskDeadline-performance.now()));
     setState('requesting_permission','Microphone is requested only by this action. End cancels this attempt; a late grant is stopped.');
@@ -345,7 +350,7 @@ async function start(){
     if(resuming&&retainedSession)url.searchParams.set('session_id',retainedSession);
     const transport=scope.addSocket(new WebSocket(url));socket=transport;
     connectTimer=scope.timer(()=>fail(resuming?'recovery_unknown':'transport_error','Relay connection/admission timed out.'),resuming?Math.max(1,5000-(performance.now()-disconnectedAt)):8000);
-    transport.onopen=()=>{if(own!==token)return;try{send({type:'hello',protocol_version:1,mode,arm,nonce});}catch(error){fail('transport_error',String(error));}};
+    transport.onopen=()=>{if(own!==token)return;try{send({type:'hello',protocol_version:CONSTANTS.PROTOCOL_VERSION,mode,arm,nonce});}catch(error){fail('transport_error',String(error));}};
     transport.onmessage=event=>{if(own!==token)return;try{if(typeof event.data!=='string')throw new Error('Binary protocol refused');receive(event.data);}catch(error){fail('protocol_error',String(error));}};
     transport.onerror=()=>{if(own===token){trace('transport_error_observed');if(admitted)lostTransport();else fail('transport_error','Relay connection failed before admission.');}};
     transport.onclose=()=>{if(own===token)lostTransport();};
@@ -357,7 +362,7 @@ async function start(){
 }
 el<HTMLSelectElement>('mode').onchange=()=>{const select=el<HTMLSelectElement>('mode');if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','disconnected','recovery_unknown'].includes(state)){select.value=mode;return;}if(state==='disconnected'||cleanupPending()){select.value=mode;el('error').textContent='End the current recovery and wait for cleanup before switching mode.';return;}++token;mode=select.value==='live'?'live':'mock';document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>{button.querySelector('small')!.textContent=mode==='live'?'Operator capability gate · unverified':button.dataset.arm==='V'?'Wire mock':button.dataset.arm==='C'?'STT → controller → TTS mock':'No generation';});retainedSession=undefined;el('live-consent-label').hidden=mode!=='live';el<HTMLInputElement>('live-consent').checked=false;el<HTMLInputElement>('text').disabled=mode==='live';el('stimulus').querySelector('button')!.disabled=mode==='live';el('evidence').textContent=mode==='live'?'LIVE · GATED / UNVERIFIED. No live activation is authorized by this UI. Separate operator authorization, capabilities, prices and matching relay mode are required; runtime and acoustic behavior remain unverified.':'KEYLESS MOCK · Source construction / runtime unverified. Synthetic tones and typed stimuli cannot establish spoken-task correctness or acoustic latency.';trace('mode_selected',{mode,admission:'server_required'});};
 el('start').onclick=()=>void start();el('end').onclick=end;el('interrupt').onclick=interrupt;el('disconnect').onclick=()=>{if(admitted)lostTransport();};el('retry').onclick=()=>{if(state==='awaiting_response'&&playbackDone&&!activeResponse){listen();}else if(['playing','awaiting_response','listening'].includes(state))interrupt();else void start();};
-document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>button.onclick=()=>{if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown'].includes(state)||cleanupPending())return;retainedSession=undefined;arm=button.dataset.arm!;document.querySelectorAll('.arm').forEach(b=>b.classList.toggle('selected',b===button));});
+document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>button.onclick=()=>{if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown'].includes(state)||cleanupPending())return;retainedSession=undefined;if(!isArm(button.dataset.arm))return;arm=button.dataset.arm;document.querySelectorAll('.arm').forEach(b=>b.classList.toggle('selected',b===button));});
 el('stimulus').onsubmit=event=>{event.preventDefault();const input=el<HTMLInputElement>('text');if(!input.value.trim())return;try{conversation(`Typed diagnostic: ${input.value}`,'user');commit(input.value);input.value='';}catch(error){fail('stimulus_failure',String(error));}};
 el('download').onclick=()=>{
   const downloadScope=newResources();const link=document.createElement('a');
@@ -371,7 +376,7 @@ window.addEventListener('pagehide',()=>{end();for(const scope of ownedScopes)sco
 // relay text/payloads, nonce, raw PCM, transcripts, tracks or socket objects.
 const browserDiagnostics=Object.freeze({
   snapshot(){return {schema_version:1,state,mode,arm,at:performance.now(),clock_domain:'browser_performance_ms',
-    owned_handles:ownedHandles(),review_workbench_handles:reviewWorkbench.handles(),
+    owned_handles:ownedHandles(),review_workbench_handles:reviewWorkbench.handles(),replay_inspector_handles:replayInspector.handles(),
     queue_seconds:{playback:context?playbackQueued/context.sampleRate:ownedHandles().worklet>0?null:0,upload:socket?socket.bufferedAmount/64000:ownedHandles().socket>0?null:0},
     observation_statuses:{state:'observed',owned_handles:'observed_api_state',playback_queue:context?'estimated':ownedHandles().worklet>0?'unknown_cleanup_pending':'observed_empty',
       upload_queue:socket?'estimated':ownedHandles().socket>0?'unknown_cleanup_pending':'observed_empty',physical_audio:'unknown',calibration:'unknown',
@@ -397,4 +402,8 @@ declare global {interface Window {readonly __voiceLabDiagnostics:typeof browserD
 Object.defineProperty(window,'__voiceLabDiagnostics',{value:browserDiagnostics,writable:false,configurable:false});
 updateControls();
 
-const reviewWorkbench=mountReviewWorkbench(el('review-workbench'),{canPlay:()=>['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown','unsupported_audio'].includes(state)&&Object.values(ownedHandles()).every(n=>n===0)});
+const reviewWorkbench=mountReviewWorkbench(el('review-workbench'),{onChanged:()=>replayRefresh(),canPlay:()=>['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown','unsupported_audio'].includes(state)&&Object.values(ownedHandles()).every(n=>n===0)});
+
+const replayInspector=mountReplayInspector(el('replay-inspector'),{reviewBinding:()=>reviewWorkbench.replayBinding(),focusReview:()=>reviewWorkbench.focus()});
+
+replayRefresh=()=>{replayInspector.refresh();};

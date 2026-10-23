@@ -9,7 +9,7 @@ const emptyDraft=():Draft=>({spoken:'',task:'',confirmation:'',reasons:new Set()
 function textNode(tag:string,text:string,parent:HTMLElement){const node=document.createElement(tag);node.textContent=text;parent.append(node);return node;}
 function scoped<T extends HTMLElement>(root:HTMLElement,selector:string){const node=root.querySelector<T>(selector);if(!node)throw new Error('Review UI element missing');return node;}
 /** Local inspection only. No fetch, upload, directory walk, journal writer or scorer. */
-export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boolean}){
+export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boolean;onChanged?:()=>void}){
   root.className='card review-workbench';root.innerHTML=`<div class="section-head"><div><p class="eyebrow">OPERATOR EVIDENCE INSPECTION</p><h2>Manual review workbench</h2></div><button data-rv="clear">Clear local bundle</button></div>
   <p class="notice">UNVERIFIED REVIEW INPUT · No appointment, independent actor, custody release, oracle or product acceptance is issued here. Heldout remains closed. Source construction and browser behavior are unverified.</p>
   <div class="review-imports"><label>D5 dev review packet<input data-rv="packet" type="file" accept=".json,application/json"></label><label>Externally supplied packet content pin<input data-rv="pin" spellcheck="false" maxlength="64" placeholder="SHA256 packet_hash from approved handoff"></label><label>Add canonical D5 playback declarations<input data-rv="access" type="file" accept=".json,application/json" multiple disabled></label><p>Pin each role declaration below using its externally supplied declaration_hash. All declarations remain unverified.</p></div>
@@ -171,7 +171,7 @@ export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boole
     if(item){const table=document.createElement('table');const body=document.createElement('tbody');for(const field of BINDING_KEYS){const row=document.createElement('tr');textNode('th',field,row);textNode('td',item.bindings[field]??'UNKNOWN / missing',row);body.append(row);}table.append(body);q('bindings').append(table);
       draft=drafts.get(item.item_id)??emptyDraft();drafts.set(item.item_id,draft);
     }else draft=emptyDraft();
-    bindDraft();renderArtifacts();inspect();updateExport();showHandles();
+    bindDraft();renderArtifacts();inspect();updateExport();showHandles();options.onChanged?.();
   }
   for(const dimension of ['spoken','task','confirmation'] as const){const label=document.createElement('label');label.textContent=dimension+' judgment';const select=document.createElement('select');select.dataset.judgment=dimension;select.append(new Option('Choose explicitly (unknown is a valid choice)',''));for(const choice of ['correct','incorrect','unknown'])select.append(new Option(choice,choice));label.append(select);q('judgments').append(label);}
   for(const reason of REASONS){const label=document.createElement('label');label.className='review-check';const check=document.createElement('input');check.type='checkbox';check.value=reason;label.append(check,document.createTextNode(reason.replaceAll('_',' ')));q('reasons').append(label);}
@@ -197,7 +197,7 @@ export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boole
     }catch(error){if(own===generation&&request===accessGeneration){message(error instanceof Error?error.message:'Playback declaration unavailable');updateExport();}}
   };
   q<HTMLSelectElement>('item').onchange=()=>{itemGeneration++;inspectionPage=0;index=Number(q<HTMLSelectElement>('item').value);renderItem();};q<HTMLSelectElement>('inspect').onchange=()=>{inspectionPage=0;inspect();};q('previous').onclick=()=>{inspectionPage=Math.max(0,inspectionPage-1);inspect();};q('next').onclick=()=>{inspectionPage=Math.min(inspectionPages-1,inspectionPage+1);inspect();};
-  for(const field of ['pin'] as const)q<HTMLInputElement>(field).oninput=()=>{stopPlayback();updateExport();};q<HTMLInputElement>('root-ack').onchange=()=>{stopPlayback();updateExport();};q('clear').onclick=clear;
+  for(const field of ['pin'] as const)q<HTMLInputElement>(field).oninput=()=>{stopPlayback();updateExport();options.onChanged?.();};q<HTMLInputElement>('root-ack').onchange=()=>{stopPlayback();updateExport();};q('clear').onclick=clear;
   q<HTMLFormElement>('form').onsubmit=event=>{
     event.preventDefault();updateExport();if(exportProblems().length||!packet||!currentItem())return;
     const submission:DecisionSubmission={schema_version:1,packet_hash:packet.packet_hash,item_id:currentItem()!.item_id,actor_ref:draft.actor,appointment_ref:draft.appointment,decided_at:draft.decidedAt,judgments:{spoken:draft.spoken as Judgment,task:draft.task as Judgment,confirmation:draft.confirmation as Judgment},reasons:REASONS.filter(reason=>draft.reasons.has(reason)),task_terminal:null,supersedes:draft.supersedes||null};
@@ -205,5 +205,5 @@ export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boole
     const id=requestAnimationFrame(()=>{rafs.delete(id);URL.revokeObjectURL(url);urls.delete(url);link.remove();showHandles();});rafs.add(id);message('UNVERIFIED submission download requested. No journal record, actor verification, oracle label or acceptance has been issued.');
   };
   window.addEventListener('pagehide',clear);renderItem();showHandles();
-  return Object.freeze({clear,stopPlayback,handles,hasPlayback:()=>audios.size>0||pendingPlays>0});
+  return Object.freeze({clear,stopPlayback,handles,replayBinding:()=>{const item=currentItem();if(!packet||!item||!packetPinned())return null;return {packet_hash:packet.packet_hash,run_id:packet.run_id,task_id:packet.task_id,item_id:item.item_id,bindings:{...item.bindings},source_hashes:{...packet.source_hashes}};},focus:()=>root.scrollIntoView({behavior:'smooth',block:'start'}),hasPlayback:()=>audios.size>0||pendingPlays>0});
 }

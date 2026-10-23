@@ -1,19 +1,16 @@
 /** D5 v1 consumer types and bounded browser-side content checks.
  * D5 remains the canonical validator/journal/authority owner. No oracle is issued. */
-export const REASONS=['evidence_consistent','wrong_spoken_slot','false_commitment','contradictory_confirmation','unrequested_booking','off_script','audio_missing','audio_ambiguous','confirmation_missing','journal_missing','trace_incomplete','binding_mismatch','not_reviewed','insufficient_evidence','superseding_correction'] as const;
-export type Reason=typeof REASONS[number];
-export type Judgment='correct'|'incorrect'|'unknown';
-export const ROLES=['input_audio','rendered_audio','confirmation_audio','confirmation','journal','trace'] as const;
+import {LITERALS,MODEL_FIELDS} from './generated/contracts';
+import {inspectShape} from './boundary';
+import type {ReviewPacket,ReviewItem,ReviewArtifact,PlaybackDeclaration,DecisionSubmission,Judgment,Reason} from './generated/contracts';
+export type {ReviewPacket,ReviewItem,ReviewArtifact,PlaybackDeclaration,DecisionSubmission,Judgment,Reason};
+export const REASONS=LITERALS.Reason;
+export const ROLES=LITERALS.ReviewArtifactRoles;
 export type Role=typeof ROLES[number];
-export const BINDING_KEYS=['run_id','task_id','trial_id','logical_turn_id','response_id','code_hash','build_hash','fixture_manifest_hash','trial_plan_hash','input_audio_hash','rendered_audio_hash','journal_hash','trace_hash','ledger_hash','confirmation_evidence_hash','confirmation_audio_hash','observed_trial_id','observed_session_id','observed_boot_id'] as const;
-export interface ReviewArtifact {path:string;sha256:string;kind:'audio'|'journal'|'trace'|'confirmation_evidence';approved_synthetic?:boolean|null}
-export interface ReviewItem {item_id:string;bindings:Record<typeof BINDING_KEYS[number],string|null>;artifacts:Record<Role,ReviewArtifact|null>;evidence_gaps:string[]}
-export interface ReviewPacket {schema_version:1;kind:'manual_review_packet';packet_id:string;packet_hash:string;run_id:string;task_id:string;created_at:string;source_hashes:Record<string,string>;artifact_root_policy:string;items:ReviewItem[];evidence_status:'unadjudicated';split:'dev'|'heldout';product_acceptance:false;gates:Record<string,unknown>}
-export interface DecisionSubmission {schema_version:1;packet_hash:string;item_id:string;actor_ref:string;appointment_ref:string;decided_at:string;judgments:Record<'spoken'|'task'|'confirmation',Judgment>;reasons:Reason[];task_terminal:null;supersedes:string|null}
-export interface PlaybackDeclaration {schema_version:1;kind:'manual_playback_declaration';packet_hash:string;item_id:string;role:'input_audio'|'rendered_audio'|'confirmation_audio';audio_hash:string;container:'wav'|'raw_pcm';media_type:'audio/wav'|'application/octet-stream';encoding:'signed_little_endian_pcm16';sample_rate:number;channels:1|2;bits_per_sample:16;approved_synthetic:true;policy:'operator_custody_expiry';approval_reference:string;input_rights_reference:string|null;output_rights_reference:string|null;manifest_reference:string;custody_reference:string;retention_until_utc:string;declaration_status:'unverified';product_acceptance:false;declaration_hash:string}
-export function isHash(value:unknown):value is string{return typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);}
+export const BINDING_KEYS=MODEL_FIELDS.ReviewBindings;
+export function isHash(value:unknown):value is string{return inspectShape('Hash',value).ok;}
 export function record(value:unknown):value is Record<string,unknown>{return value!==null&&typeof value==='object'&&!Array.isArray(value);}
-function identifier(value:unknown){return typeof value==='string'&&/^[A-Za-z0-9_-]{1,96}$/.test(value);}
+function identifier(value:unknown){return inspectShape('Identifier',value).ok;}
 function boundedText(value:unknown,max=500){return typeof value==='string'&&value.trim().length>0&&value.length<=max&&!/[\u0000-\u001f\u007f]/.test(value);}
 export function offsetTime(value:unknown):value is string{
   if(typeof value!=='string'||value.length>40)return false;
@@ -35,19 +32,19 @@ export function parsePacket(text:string):ReviewPacket {
   if(text.length>512000)throw new Error('Packet exceeds the D5 v1 metadata byte bound');
   requireSafeNumbers(text);
   const packet:unknown=JSON.parse(text);
-  const keys=['schema_version','kind','packet_id','packet_hash','run_id','task_id','created_at','source_hashes','artifact_root_policy','items','evidence_status','split','product_acceptance','gates'];
+  const keys=MODEL_FIELDS.ReviewPacket;
   if(!record(packet)||!exactKeys(packet,keys)||packet.schema_version!==1||packet.kind!=='manual_review_packet'||packet.evidence_status!=='unadjudicated'||packet.product_acceptance!==false||!['dev','heldout'].includes(String(packet.split)))throw new Error('Unsupported D5 packet structure');
   if(!isHash(packet.packet_hash)||!identifier(packet.packet_id)||!identifier(packet.run_id)||!identifier(packet.task_id)||!boundedText(packet.created_at)||!boundedText(packet.artifact_root_policy,1000)||!record(packet.gates)||!record(packet.source_hashes)||Object.keys(packet.source_hashes).length>100||!Object.values(packet.source_hashes).every(isHash))throw new Error('Invalid packet identity/source hashes');
   if(!Array.isArray(packet.items)||packet.items.length<1||packet.items.length>8)throw new Error('Packet must contain one to eight items');
   const seen=new Set<string>();
   for(const raw of packet.items){
-    if(!record(raw)||!exactKeys(raw,['item_id','bindings','artifacts','evidence_gaps'])||!identifier(raw.item_id)||seen.has(String(raw.item_id))||!record(raw.bindings)||!exactKeys(raw.bindings,BINDING_KEYS)||!record(raw.artifacts)||!exactKeys(raw.artifacts,ROLES)||!Array.isArray(raw.evidence_gaps)||raw.evidence_gaps.length>100||!raw.evidence_gaps.every(g=>typeof g==='string'&&g.length<=2000))throw new Error('Invalid/duplicate item or closed artifact roles');
+    if(!record(raw)||!exactKeys(raw,MODEL_FIELDS.ReviewItem)||!identifier(raw.item_id)||seen.has(String(raw.item_id))||!record(raw.bindings)||!exactKeys(raw.bindings,BINDING_KEYS)||!record(raw.artifacts)||!exactKeys(raw.artifacts,ROLES)||!Array.isArray(raw.evidence_gaps)||raw.evidence_gaps.length>100||!raw.evidence_gaps.every(g=>typeof g==='string'&&g.length<=2000))throw new Error('Invalid/duplicate item or closed artifact roles');
     seen.add(String(raw.item_id));const b=raw.bindings;
     if(b.run_id!==packet.run_id||b.task_id!==packet.task_id||b.logical_turn_id!==raw.item_id||!identifier(b.trial_id))throw new Error('Item/run/task/logical identity mismatch');
     for(const key of BINDING_KEYS){const value=b[key];if(key.endsWith('_hash')){if(value!==null&&!isHash(value))throw new Error('Malformed binding hash');}else if(value!==null&&!identifier(value))throw new Error('Malformed binding identifier');}
     for(const role of ROLES){const ref=raw.artifacts[role];if(ref===null)continue;
       const kind=role.endsWith('_audio')?'audio':role==='confirmation'?'confirmation_evidence':role;
-      if(!record(ref)||!Object.keys(ref).every(k=>['path','sha256','kind','approved_synthetic'].includes(k))||!safeRelativePath(ref.path)||!isHash(ref.sha256)||ref.kind!==kind||(kind==='audio'&&ref.approved_synthetic!==true))throw new Error('Unsafe/unapproved artifact reference');
+      if(!record(ref)||!Object.keys(ref).every(k=>(MODEL_FIELDS.ReviewArtifact as readonly string[]).includes(k))||!safeRelativePath(ref.path)||!isHash(ref.sha256)||ref.kind!==kind||(kind==='audio'&&ref.approved_synthetic!==true))throw new Error('Unsafe/unapproved artifact reference');
     }
   }
   return packet as unknown as ReviewPacket;
@@ -68,8 +65,8 @@ export const ROLE_BINDING:Record<Role,typeof BINDING_KEYS[number]>={input_audio:
 export function itemGaps(item:ReviewItem){const gaps=[...item.evidence_gaps];for(const key of BINDING_KEYS)if(item.bindings[key]===null)gaps.push('Missing binding: '+key);for(const role of ROLES){const ref=item.artifacts[role];if(!ref)gaps.push('Missing artifact: '+role);else if(ref.sha256!==item.bindings[ROLE_BINDING[role]])gaps.push('Binding mismatch: '+role);}return [...new Set(gaps)];}
 export function parseDeclaration(text:string,packet:ReviewPacket):PlaybackDeclaration {
   if(text.length>128000)throw new Error('Playback declaration exceeds bound');requireSafeNumbers(text);const value:unknown=JSON.parse(text);
-  const keys=['schema_version','kind','packet_hash','item_id','role','audio_hash','container','media_type','encoding','sample_rate','channels','bits_per_sample','approved_synthetic','policy','approval_reference','input_rights_reference','output_rights_reference','manifest_reference','custody_reference','retention_until_utc','declaration_status','product_acceptance','declaration_hash'];
-  if(!record(value)||!exactKeys(value,keys)||value.schema_version!==1||value.kind!=='manual_playback_declaration'||value.packet_hash!==packet.packet_hash||!identifier(value.item_id)||!['input_audio','rendered_audio','confirmation_audio'].includes(String(value.role))||!isHash(value.audio_hash)||!isHash(value.declaration_hash)||value.approved_synthetic!==true||value.policy!=='operator_custody_expiry'||value.declaration_status!=='unverified'||value.product_acceptance!==false||!offsetTime(value.retention_until_utc))throw new Error('Unsupported/unbound canonical D5 playback declaration');
+  const keys=MODEL_FIELDS.PlaybackDeclaration;
+  if(!record(value)||!exactKeys(value,keys)||value.schema_version!==1||value.kind!=='manual_playback_declaration'||value.packet_hash!==packet.packet_hash||!identifier(value.item_id)||!(LITERALS.PlaybackDeclaration_role as readonly unknown[]).includes(value.role)||!isHash(value.audio_hash)||!isHash(value.declaration_hash)||value.approved_synthetic!==true||value.policy!=='operator_custody_expiry'||value.declaration_status!=='unverified'||value.product_acceptance!==false||!offsetTime(value.retention_until_utc))throw new Error('Unsupported/unbound canonical D5 playback declaration');
   if(!['wav','raw_pcm'].includes(String(value.container))||!['audio/wav','application/octet-stream'].includes(String(value.media_type))||(value.container==='wav')!==(value.media_type==='audio/wav')||value.encoding!=='signed_little_endian_pcm16'||!Number.isSafeInteger(value.sample_rate)||Number(value.sample_rate)<8000||Number(value.sample_rate)>192000||![1,2].includes(Number(value.channels))||typeof value.channels!=='number'||value.bits_per_sample!==16)throw new Error('Declared PCM16 media metadata is unsupported');
   for(const key of ['approval_reference','manifest_reference','custody_reference'])if(!boundedText(value[key]))throw new Error('Declared retention/approval/custody references missing');
   for(const key of ['input_rights_reference','output_rights_reference'])if(value[key]!==null&&!boundedText(value[key]))throw new Error('Malformed declared rights reference');
