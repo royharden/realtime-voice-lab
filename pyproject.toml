@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-validation = ["playwright==1.49.1"]
+validation = ["playwright==1.49.1", "psutil==6.1.1"]
 
 [project.scripts]
 voicelab = "voicelab.cli:main"
