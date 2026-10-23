@@ -22,7 +22,7 @@ class Model(BaseModel):
 class Hello(Model):
     type: Literal["hello"]
     protocol_version: Literal[1]
-    mode: Literal["mock"]
+    mode: Literal["mock", "live"]
     arm: Literal["V", "C", "K"]
     nonce: Annotated[str, Field(min_length=16, max_length=128)]
 
@@ -116,6 +116,7 @@ class VoiceEvent(Model):
     sample_offset: Annotated[int | None, Field(strict=True, ge=0)] = None
     sample_rate: Literal[24000] | None = None
     artifact_hash: Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")] = None
+    content_hash: Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")] = None
 
 
 class ServerMessage(Model):

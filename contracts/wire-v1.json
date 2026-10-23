@@ -8,7 +8,7 @@
   "properties": {
     "type": {"enum": ["hello", "audio", "commit", "interrupt", "rendered", "resume", "end", "ping"]},
     "protocol_version": {"const": 1},
-    "mode": {"const": "mock"},
+    "mode": {"enum": ["mock", "live"]},
     "arm": {"enum": ["V", "C", "K"]},
     "nonce": {"type": "string", "minLength": 16, "maxLength": 128},
     "turn_id": {"$ref": "#/$defs/id"},

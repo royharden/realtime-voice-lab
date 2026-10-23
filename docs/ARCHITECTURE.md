@@ -19,16 +19,22 @@ exceed 48000 unacknowledged samples. Three sessions are admitted; a fourth is re
 The adapter factory supplies the V/C/K mock implementations. Its wire parsers and
 serializers sit below `ArmSession`; mock text is explicitly debug stimulus rather
 than ASR. The adapter returns a diagnostic tone rather than licensed speech. The
-relay does not make external provider calls or admit live mode. The server serializes
-all output and records stale epoch discards before permitting current audio.
+default relay activation makes no external provider calls and admits only mock mode.
+A programmatic live Settings path composes D2's guarded transport producer behind
+explicit authorization/capability/pricing/rights/evaluation manifests and exact run
+budget. Missing inputs refuse admission; no real provider capability is asserted.
+The server serializes all output and records stale epoch discards before permitting
+current audio. The live browser mode cannot override operator-side gates.
 
 `TaskAuthority` owns SQLite transactions and every effect. It alone creates operation
 IDs from namespace/logical-turn/command, stores original outcomes and appends every
 attempt. A second uniqueness constraint allows only one booking per trial. Selecting
 an offered slot creates a challenge bound to slot and state version; a separate
 explicit affirmative turn with the current response epoch is required to commit.
-The mock lexical controller supplies that affirmative evidence; a future provider
-tool call alone must never do so. Interrupting after commit preserves the booking.
+The mock lexical controller supplies labeled mock affirmative evidence. Live native
+confirmation requires an independently admitted trusted evidence verifier bound to
+the actual input, current slot/version/challenge/epoch; a provider tool call or
+transcript alone cannot supply it. Interrupting after commit preserves the booking.
 
 The session reducer holds a response until generation finishes and the final rendered
 sample is acknowledged. Interruption advances the epoch before adapter cancellation.
@@ -39,12 +45,21 @@ one explicit repeat request and a task-journal snapshot; a second ambiguous reco
 terminates. Browser reload has no recovered identity and abandons that trial. Process
 restart cannot reconstruct in-memory sessions and is labeled service restart; SQLite
 retains effects and liability.
+Live provider recovery currently terminates `recovery_unknown` until its acknowledged
+history rebuild can be established; the mock recovery path does not certify it.
 
 Trace files contain bounded metadata-only `VoiceEvent` rows with explicit server
 monotonic nanoseconds and a final SHA256. Raw PCM is not embedded in trace telemetry.
 Diagnostic output tone frames are stored separately by SHA256 as mono 24 kHz PCM16;
 their hashes appear in audio events. Microphone input is not retained by this mock
 artifact path, so confirmation-audio custody and spoken-task adjudication remain unknown.
+Live manual input/output is ephemeral; trace `content_hash` is a digest, distinct from
+a saved `artifact_hash`. A trusted verifier must inspect actual ephemeral input rather
+than infer affirmation from that digest. Optional per-trial synthetic retention
+manifests bind explicit fixture/hash/rights/expiry approval to the actual trial ID.
+Only the full-input hash match at closure admits raw persistence; optional output
+retention includes rendered ACK prefixes only. No manifest/match remains ephemeral.
+Per-session sidecars bind archived hashes to that manifest and custody expiry.
 `AttemptLedger` separately stores exact Decimal reservations, settlement and unknown
 liability; mock attempts reserve and settle zero with an explicit no-provider basis.
 The model vocabulary also defines run manifests, turn results and evidence records;
