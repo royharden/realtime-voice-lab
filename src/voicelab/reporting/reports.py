@@ -45,6 +45,79 @@ def _distribution(values):
     return {name: quantile(values, q) for name, q in [('p50', Decimal('.50')), ('p95', Decimal('.95'))]}
 
 
+def _withheld_distribution(values, reasons):
+    """Keep the known/potential-start count, never publish a reduced headline."""
+    return {name: {'n': len(values), 'rank': None, 'value_ms': None,
+                   'label': 'withheld: cohort membership or admission evidence incomplete',
+                   'complete': False, 'reasons': sorted(set(reasons))}
+            for name in ('p50', 'p95')}
+
+
+def _retain_scheduled(manifest, rows, source_fields, ledger):
+    scheduled = set(manifest['scheduled_turns'])
+    assignments = manifest['turn_assignments']
+    assignment_ids = [row['logical_turn_id'] for row in assignments]
+    if len(assignment_ids) != len(set(assignment_ids)) or set(assignment_ids) - scheduled:
+        raise ValueError('duplicate or unscheduled turn assignment')
+    by_assignment = {row['logical_turn_id']: row for row in assignments}
+    by_row = {row['logical_turn_id']: row for row in rows}
+    by_attempt = {}
+    for attempt in ledger.get('attempts', []):
+        by_attempt.setdefault(attempt['logical_turn_id'], []).append(attempt)
+    global_reasons = []
+    if scheduled - set(assignment_ids):
+        global_reasons.append('prespecified cohort/task assignments missing for scheduled turns')
+    retained = []
+    metadata = ('trial_id', 'arm', 'cohort', 'network_profile', 'model_version', 'task_id', 'family', 'pair_id')
+    for turn in sorted(scheduled):
+        assignment = by_assignment.get(turn)
+        source = by_row.get(turn)
+        attempts = by_attempt.get(turn, [])
+        row = dict(source) if source else {'run_id': manifest['run_id'], 'logical_turn_id': turn,
+            'outcome': 'missing_terminal', 'task_correct': None, 'spoken_correct': None,
+            'unknown_reason': 'missing source row', 'missing_source_row': True}
+        reasons = []
+        if assignment:
+            for field in metadata:
+                if (source and field in source_fields[turn] and source.get(field) is not None
+                        and source[field] != assignment[field]):
+                    raise ValueError('terminal metadata conflicts with prespecified turn assignment: ' + field)
+                row[field] = assignment[field]
+            if any(attempt.get('arm') != assignment['arm'] for attempt in attempts):
+                raise ValueError('ledger arm conflicts with prespecified assignment')
+        else:
+            reasons.append('prespecified turn assignment missing')
+        independent = assignment['admission'] if assignment and assignment['admission_evidence_reference'] else 'unknown'
+        terminal_admission = source.get('admission', 'unknown') if source else 'unknown'
+        terminal_started = terminal_admission in {'started', 'missing_terminal'}
+        ledger_started = any(attempt.get('started') is True or attempt.get('dispatched') is True
+                             or attempt.get('state') in {'settled', 'unknown'} for attempt in attempts)
+        possible_start = bool(attempts)
+        if independent == 'started' or terminal_started or possible_start:
+            row['admission'] = 'started'
+            if independent in {'refused', 'not_started'} or terminal_admission == 'refused':
+                reasons.append('conflicting start/refusal evidence')
+            if possible_start and not (independent == 'started' or terminal_started or ledger_started):
+                reasons.append('reservation exists but dispatch/start remains ambiguous')
+            admission_source = 'independent_record' if independent == 'started' else (
+                'terminal_row' if terminal_started else 'ledger_attempt')
+        elif independent in {'refused', 'not_started'}:
+            row['admission'] = independent
+            admission_source = 'independent_record'
+        elif terminal_admission == 'refused':
+            row['admission'] = 'refused'
+            admission_source = 'terminal_row'
+        else:
+            row['admission'] = 'unknown'
+            admission_source = 'unknown'
+            reasons.append('start/admission not established independently of missing terminal')
+        row['admission_source'] = admission_source
+        row['admission_evidence_reference'] = assignment['admission_evidence_reference'] if assignment else None
+        row['denominator_uncertainty'] = reasons
+        retained.append(row)
+    return retained, global_reasons
+
+
 def paired_analysis(rows: list[dict], seed: int, mode: str) -> dict:
     pairs = {}
     for row in rows:
@@ -131,6 +204,7 @@ def cost_analysis(ledger: dict, manifest: dict) -> dict:
 
 def build_report(manifest: dict, rows: list[dict], ledger: dict) -> dict:
     manifest = RunManifest.model_validate(manifest).model_dump(mode='json')
+    source_fields = {row['logical_turn_id']: set(row) for row in rows}
     rows = [TurnResult.model_validate(row).model_dump(mode='json') for row in rows]
     if any(row['run_id'] != manifest['run_id'] for row in rows):
         raise ValueError('result row from different run')
@@ -145,9 +219,7 @@ def build_report(manifest: dict, rows: list[dict], ledger: dict) -> dict:
         raise ValueError('row not present in scheduled denominator')
     if any(attempt.get('logical_turn_id') not in scheduled for attempt in ledger.get('attempts', [])):
         raise ValueError('ledger contains attempt outside this run scheduled denominator')
-    retained = [dict(by_id.get(turn, {'logical_turn_id': turn, 'admission': 'unknown',
-                                    'outcome': 'missing_terminal', 'unknown_reason': 'missing source row',
-                                    'missing_source_row': True})) for turn in sorted(scheduled)]
+    retained, global_reasons = _retain_scheduled(manifest, rows, source_fields, ledger)
     groups = {}
     for row in retained:
         # Never pool mode/arm/network/model/fixture cohorts.
@@ -166,12 +238,19 @@ def build_report(manifest: dict, rows: list[dict], ledger: dict) -> dict:
         for row in started:
             outcome = row.get('outcome') or 'unknown'
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        denominator_reasons = global_reasons + [reason for row in group for reason in row['denominator_uncertainty']]
+        clean_values = [_latency(r, 'render_latency_ms', qualified=True) for r in clean]
+        headline = (_withheld_distribution(clean_values, denominator_reasons) if denominator_reasons
+                    else _distribution(clean_values))
         cohorts.append({'identity': dict(zip(('mode', 'arm', 'network_profile', 'model_version', 'cohort'), key)),
             'scheduled': len(group), 'started': len(started),
             'refused': sum(r.get('admission') == 'refused' for r in group),
-            'admission_unknown': sum(r.get('admission') not in {'started', 'missing_terminal', 'refused'} for r in group),
+            'not_started': sum(r.get('admission') == 'not_started' for r in group),
+            'admission_unknown': sum(r.get('admission') not in {'started', 'missing_terminal', 'refused', 'not_started'} for r in group),
             'terminal_counts': outcomes, 'conditional_latency': conditional,
-            'all_started_clean_acceptable_render': _distribution([_latency(r, 'render_latency_ms', qualified=True) for r in clean]),
+            'all_started_denominator_complete': not denominator_reasons,
+            'denominator_incompleteness_reasons': sorted(set(denominator_reasons)),
+            'all_started_clean_acceptable_render': headline,
             'task_results': 'reported separately; turn success is not task success'})
     tasks = task_analysis(manifest, retained)
     costs = cost_analysis(ledger, manifest)
@@ -180,6 +259,9 @@ def build_report(manifest: dict, rows: list[dict], ledger: dict) -> dict:
     return {'schema_version': 1, 'run_id': manifest['run_id'], 'created_at': manifest['created_at'],
             'evidence_status': 'descriptive input report; independent acceptance not implied',
             'scheduled_turn_count': len(scheduled), 'rows': retained, 'cohorts': cohorts,
+            'all_started_denominator_complete': not global_reasons and all(not row['denominator_uncertainty'] for row in retained),
+            'denominator_incompleteness_reasons': sorted(set(global_reasons + [
+                reason for row in retained for reason in row['denominator_uncertainty']])),
             'ledger': ledger, 'costs': costs, 'tasks': tasks,
             'paired': paired_analysis(retained, manifest.get('bootstrap_seed', 0), manifest['mode']), 'winner': None,
             'limitations': ['No architecture causal claim', 'Unknown spoken correctness is nonattainment',
