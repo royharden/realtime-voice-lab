@@ -37,6 +37,9 @@ def main(argv: Sequence[str] | None = None) -> int | None:
         "soak": ("voicelab.harness.cli", "soak"),
         "audit-split": ("voicelab.harness.cli", "audit-split"),
         "demo": ("voicelab.harness.cli", "demo"),
+        "cohort": ("voicelab.harness.cli", "cohort"),
+        "import-fixture-catalog": ("voicelab.harness.cli", "import-fixture-catalog"),
+        "generate-dev-fixture": ("voicelab.harness.cli", "generate-dev-fixture"),
     }
     for command in delegates:
         commands.add_parser(command, add_help=False, help=f"Delegate to the {command} source component")
