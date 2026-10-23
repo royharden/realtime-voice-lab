@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from importlib import import_module
 from pathlib import Path
 from collections.abc import Sequence
@@ -16,6 +17,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     serve.add_argument("--host", choices=["127.0.0.1"], default="127.0.0.1")
     serve.add_argument("--port", type=int, required=True, help="A port already claimed via agent-ports")
     serve.add_argument("--port-claim", required=True, type=Path, help="Existing port claim receipt")
+    serve.add_argument("--run-id", default="mock-local", help="Frozen run identity, preserved in evidence")
+    serve.add_argument("--run-manifest-hash", help="Operator-supplied SHA-256 link; not execution proof")
+    serve.add_argument("--artifact-root", type=Path, default=Path(".agent-work/runtime"))
+    serve.add_argument("--allowed-origin", help="Exact registered loopback browser origin")
     delegates = {
         "run": ("voicelab.evaluation.cli", "run"),
         "eval": ("voicelab.evaluation.cli", "report"),
@@ -38,7 +43,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         component.main([subcommand, *remaining])
         return
     if remaining:
-        parser.error("Unrecognized serve arguments: " + " ".join(remaining))
+        parser.error("Unrecognized serve arguments; see serve --help")
     if args.command == "serve":
         if not 20000 <= args.port <= 29999:
             parser.error("Port must be in the machine-wide reserved 20000–29999 band")
@@ -47,8 +52,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         # A receipt path is an operator checkpoint, not independent ownership verification.
         # The agent-ports check remains required immediately before actual later activation.
         import uvicorn
+        from voicelab.server.app import Settings, create_app
 
-        uvicorn.run("voicelab.server.app:create_app", factory=True, host=args.host, port=args.port)
+        settings = Settings(
+            nonce=os.environ.get("VOICELAB_NONCE", os.environ.get("VOICELAB_SESSION_NONCE", "")),
+            allowed_origin=args.allowed_origin or os.environ.get("VOICELAB_ALLOWED_ORIGIN", ""),
+            artifact_root=args.artifact_root,
+            mode=args.mode,
+            run_id=args.run_id,
+            run_manifest_hash=args.run_manifest_hash,
+        )
+        uvicorn.run(create_app(settings), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
