@@ -10,7 +10,7 @@ from pathlib import Path
 from collections.abc import Sequence
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def main(argv: Sequence[str] | None = None) -> int | None:
     parser = argparse.ArgumentParser(description="Realtime Voice Lab (keyless mock by default)")
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="Start the local mock relay after runtime authorization")
@@ -49,8 +49,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             if error.name and (module_name == error.name or module_name.startswith(error.name + ".")):
                 parser.error(f"Source component {module_name} is unavailable in this checkout")
             raise
-        component.main([subcommand, *remaining])
-        return
+        return component.main([subcommand, *remaining])
     if remaining:
         parser.error("Unrecognized serve arguments; see serve --help")
     if args.command == "serve":
@@ -82,8 +81,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             run_manifest_hash=args.run_manifest_hash,
             mock_fault_policy=fault_policy,
         )
-        uvicorn.run(create_app(settings), host=args.host, port=args.port)
+        from voicelab.runtime_logging import listener_logging_config
+
+        uvicorn.run(
+            create_app(settings), host=args.host, port=args.port,
+            ws="websockets", ws_max_size=24_000,
+            access_log=False, log_level="warning",
+            log_config=listener_logging_config(),
+        )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
