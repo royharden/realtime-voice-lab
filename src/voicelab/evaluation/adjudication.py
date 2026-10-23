@@ -126,7 +126,78 @@ class DecisionRecord(Model):
     record_hash: Hash
 
 
+class PlaybackDeclaration(Model):
+    schema_version: Literal[1]
+    kind: Literal['manual_playback_declaration']
+    packet_hash: Hash
+    item_id: Identifier
+    role: Literal['input_audio', 'rendered_audio', 'confirmation_audio']
+    audio_hash: Hash
+    container: Literal['wav', 'raw_pcm']
+    media_type: Literal['audio/wav', 'application/octet-stream']
+    encoding: Literal['signed_little_endian_pcm16']
+    sample_rate: int = Field(strict=True, ge=8_000, le=192_000)
+    channels: Literal[1, 2]
+    bits_per_sample: Literal[16]
+    approved_synthetic: Literal[True]
+    policy: Literal['operator_custody_expiry']
+    approval_reference: str = Field(min_length=1, max_length=500)
+    input_rights_reference: str | None
+    output_rights_reference: str | None
+    manifest_reference: str = Field(min_length=1, max_length=500)
+    custody_reference: str = Field(min_length=1, max_length=500)
+    retention_until_utc: str
+    declaration_status: Literal['unverified']
+    product_acceptance: Literal[False]
+    declaration_hash: Hash
+
+    @field_validator('retention_until_utc')
+    @classmethod
+    def explicit_expiry(cls, value: str) -> str:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            raise ValueError('declared expiry requires an explicit offset')
+        return value
+
+
+def _browser_json(value: object) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError('manual packet JSON keys must be strings')
+            _browser_json(item)
+    elif isinstance(value, list):
+        for item in value:
+            _browser_json(item)
+    elif type(value) is int:
+        if abs(value) > 9_007_199_254_740_991:
+            raise ValueError('manual packet integer exceeds exact browser JSON range')
+    elif value is not None and type(value) not in {str, bool}:
+        raise ValueError('manual packet hash domain forbids floats/non-JSON values')
+
+
+def validate_playback_declaration(packet: dict, declaration: dict) -> None:
+    """Structural binding only; never returns playback/custody/identity authorization."""
+    validate_packet(packet)
+    PlaybackDeclaration.model_validate(declaration)
+    _browser_json(declaration)
+    if declaration['declaration_hash'] != digest({k: v for k, v in declaration.items() if k != 'declaration_hash'}):
+        raise ValueError('playback declaration hash mismatch')
+    item = next((item for item in packet['items'] if item['item_id'] == declaration['item_id']), None)
+    if declaration['packet_hash'] != packet['packet_hash'] or item is None:
+        raise ValueError('playback declaration belongs to another packet/item')
+    reference = item['artifacts'].get(declaration['role'])
+    if reference is None or reference['sha256'] != declaration['audio_hash']:
+        raise ValueError('playback bytes not pinned by the approved packet artifact')
+    if (declaration['container'] == 'wav') != (declaration['media_type'] == 'audio/wav'):
+        raise ValueError('declared media/container mismatch')
+    rights = declaration['output_rights_reference'] if declaration['role'] == 'rendered_audio' else declaration['input_rights_reference']
+    if not isinstance(rights, str) or not 1 <= len(rights) <= 500:
+        raise ValueError('declared role-specific rights reference missing')
+
+
 def validate_packet(packet: dict) -> None:
+    _browser_json(packet)
     if len(canonical_bytes(packet)) > 512_000:
         raise ValueError('manual review packet exceeds bounded metadata size')
     ReviewPacket.model_validate(packet)

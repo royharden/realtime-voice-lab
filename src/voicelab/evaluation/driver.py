@@ -40,7 +40,7 @@ def convert_driver_events(events: list[dict], plan: dict) -> dict:
                 'logical_turn_id': turn, 'admission': 'unknown', 'outcome': None, 'timing_domain': 'unknown'})
         kind = event.get('kind')
         if kind == 'wire_received':
-            message = event.get('message', {})
+            message = event.get('message_metadata', {})
             try:
                 ServerMessage.model_validate(message)
             except ValueError:
@@ -62,7 +62,13 @@ def convert_driver_events(events: list[dict], plan: dict) -> dict:
                 ready[task_id] = value
             # A transport's ended ledger can supply attempt-to-observed-task correlations.
             if message.get('type') == 'ended' and task_id in ready:
-                for attempt in payload.get('ledger', {}).get('attempts', []):
+                scope = (payload.get('ledger_artifact') or {}).get('scope')
+                ledger = payload.get('ledger')
+                for attempt in ledger.get('attempts', []) if isinstance(ledger, dict) else []:
+                    # D4 emits a whole-run snapshot. Capturing it for this session
+                    # does not assign every historical attempt to this session.
+                    if scope != 'session_ledger_snapshot' and attempt.get('session_id') != ready[task_id]['session_id']:
+                        continue
                     candidate = {**ready[task_id], 'attempt_id': attempt['attempt_id'],
                                  'observed_logical_turn_id': attempt['logical_turn_id']}
                     old = attempt_mappings.get(attempt['attempt_id'])
@@ -93,7 +99,7 @@ def convert_driver_events(events: list[dict], plan: dict) -> dict:
                 if checked['kind'] == 'turn_ended':
                     observations[turn]['outcome'] = checked.get('terminal_outcome')
         if kind == 'wire_sent' and turn is not None and task_id in ready:
-            message = event.get('message', {})
+            message = event.get('message_metadata', {})
             if message.get('type') in {'audio', 'commit'} and message.get('turn_id'):
                 observed = ready[task_id]
                 identity = (observed['observed_run_id'], observed['observed_trial_id'], observed['session_id'], message['turn_id'])

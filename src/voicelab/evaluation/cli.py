@@ -59,12 +59,24 @@ def main(argv: list[str] | None = None) -> int:
     custody.add_argument('--freeze-hash', required=True)
     custody.add_argument('--release-hash', required=True)
     custody.add_argument('--out', required=True)
+    reproduce = sub.add_parser('reproduce', help='later sealed-bundle byte replay with the canonical reporter only')
+    reproduce.add_argument('--bundle-root', required=True)
+    reproduce.add_argument('--expectation', required=True, help='safe relative immutable expectation JSON')
+    reproduce.add_argument('--expectation-sha256', required=True, help='externally retained exact expectation-file hash')
+    reproduce.add_argument('--stage-root', required=True, help='existing explicitly owned output parent')
+    reproduce.add_argument('--stage-name', required=True, help='fresh single directory name; never reused')
     args = parser.parse_args(argv)
     if args.command == "plan":
         result = create_trial_plan(json.loads(Path(args.request).read_text(encoding="utf-8")))
         # Exclusive creation: changing a published plan requires a new file and cohort.
         with Path(args.out).open("xb") as stream:
             stream.write(canonical_bytes(result))
+    elif args.command == 'reproduce':
+        from .reproduction import reproduce_reports
+        comparison = reproduce_reports(args.bundle_root, args.expectation,
+            expectation_sha256=args.expectation_sha256, stage_root=args.stage_root, stage_name=args.stage_name)
+        print(canonical_bytes(comparison).decode('utf-8'), end='')
+        return 0 if comparison['reproduced'] else 1
     elif args.command == 'review-packet':
         from .adjudication import prepare_review_packet
         packet = prepare_review_packet(json.loads(Path(args.bundle).read_text(encoding='utf-8')),

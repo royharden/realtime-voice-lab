@@ -10,6 +10,10 @@ from pathlib import Path
 from voicelab.contracts import RunManifest, TurnResult
 from .timing import stage_rows
 
+REPORT_GENERATOR_VERSION = 1
+REPORT_OUTPUT_FILES = ('results.json', 'results.md', 'results.jsonl', 'ledger-summary.md',
+                       'failures.json', 'numeric-fragments.json', 'README-results.md', 'LIMITATIONS-results.md')
+
 
 def quantile(values: list[Decimal | None], q: Decimal, deadline: Decimal = Decimal('10000')) -> dict:
     """None is nonattainment, sorted after all attained values. Units ms."""
@@ -529,4 +533,7 @@ def write_report(manifest_path: str | Path, rows_path: str | Path, ledger_path: 
                                    for item in report['failed_items']) if report['failed_items'] else
                          'No failed items in the supplied analysis; this does not establish independent acceptance.')
                       + '\n\nExact inputs: `' + json.dumps(report['input_sha256'], sort_keys=True) + '`\n', encoding='utf-8')
-    return [structured, summary, raw_rows, cost, failures, fragments, readme, limits]
+    written = [structured, summary, raw_rows, cost, failures, fragments, readme, limits]
+    if tuple(path.name for path in written) != REPORT_OUTPUT_FILES:
+        raise ValueError('canonical report output contract drift')
+    return written

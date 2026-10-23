@@ -302,6 +302,21 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
     raw_trace = reader.jsonl("trace", "trace")
     trace, integrity = _trace_rows(raw_trace, manifest, assignments, conversion['correlations'], conversion['task_admissions'])
     integrity += conversion['issues']
+    # Exact trace attempt IDs can bind whole-run ledger rows. Never attribute an
+    # entire run snapshot by the session that happened to capture it or sum totals.
+    attempt_parents = {row['attempt_id']: row for row in conversion['attempt_correlations']}
+    for event in trace:
+        turn = event['_scheduled_logical_turn_id']
+        if event.get('attempt_id') and turn is not None:
+            parent = {'attempt_id': event['attempt_id'], 'logical_turn_id': turn,
+                      'observed_logical_turn_id': event['logical_turn_id'],
+                      'observed_run_id': event['run_id'], 'observed_trial_id': event['trial_id'],
+                      'session_id': event['session_id'], 'observed_boot_id': event.get('boot_id')}
+            old = attempt_parents.get(event['attempt_id'])
+            if old and any(old.get(key) != parent[key] for key in ('logical_turn_id', 'observed_logical_turn_id', 'session_id')):
+                raise ValueError('trace/driver attempt-parent lineage conflicts')
+            attempt_parents[event['attempt_id']] = parent
+    conversion['attempt_correlations'] = [attempt_parents[key] for key in sorted(attempt_parents)]
     raw_ledger = reader.json("ledger", "ledger")
     attempts, ledger = _attempts(raw_ledger, assignments, conversion['attempt_correlations'])
     adjudications = _index(reader.jsonl("adjudication", "adjudication"), "logical_turn_id") if "adjudication" in bundle["artifacts"] else {}
