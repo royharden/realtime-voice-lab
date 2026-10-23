@@ -34,6 +34,9 @@ class LifecycleJournal:
               session_id TEXT NOT NULL REFERENCES relay_sessions(session_id),
               content_hash TEXT NOT NULL, metadata TEXT NOT NULL,
               PRIMARY KEY(session_id, content_hash));
+            CREATE TABLE IF NOT EXISTS relay_admission(
+              session_id TEXT PRIMARY KEY REFERENCES relay_sessions(session_id),
+              metadata TEXT NOT NULL);
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(relay_sessions)")}
             if "run_manifest_hash" not in columns:
@@ -115,8 +118,16 @@ class LifecycleJournal:
         with self._connect() as db:
             db.execute("INSERT OR IGNORE INTO relay_artifacts VALUES(?,?,?)", (session, digest, encoded))
 
+    def admission(self, session: str, metadata: dict) -> None:
+        encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if len(encoded.encode('utf-8')) > 32768:
+            raise ValueError('admission_metadata_bound')
+        with self._connect() as db:
+            db.execute('INSERT INTO relay_admission VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET metadata=excluded.metadata', (session, encoded))
+
     def export(self, session: str) -> dict[str, object] | None:
         with self._connect() as db:
+            db.execute('BEGIN')
             row = db.execute("SELECT * FROM relay_sessions WHERE session_id=?", (session,)).fetchone()
             if row is None:
                 return None
@@ -124,8 +135,10 @@ class LifecycleJournal:
                 "SELECT * FROM relay_turns WHERE session_id=? ORDER BY started_ns,transport_turn_id", (session,))]
             artifacts = [{"content_hash": item["content_hash"], **json.loads(item["metadata"])}
                 for item in db.execute("SELECT * FROM relay_artifacts WHERE session_id=? ORDER BY content_hash", (session,))]
+            admission = db.execute('SELECT metadata FROM relay_admission WHERE session_id=?', (session,)).fetchone()
             return {"schema_version": 1, "run_id": row["run_id"], "trial_id": row["trial_id"],
                 "session_id": row["session_id"], "boot_id": row["boot_id"],
                 "session": dict(row), "turns": turns, "artifacts": artifacts,
+                "admission": json.loads(admission['metadata']) if admission is not None else None,
                 "clock_domain": "server_monotonic_ns", "clock_scope": "boot_id",
                 "trace_reference": f"traces/{session}.jsonl", "spoken_task_acceptance": "unknown"}

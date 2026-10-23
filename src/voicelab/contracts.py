@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from decimal import Decimal, localcontext
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
@@ -18,6 +19,92 @@ TerminalOutcome = Literal["success", "task_failure", "off_script", "permission_d
 
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+DecimalText = Annotated[str, Field(pattern=r"^\d{1,18}(?:\.\d{1,18})?$", max_length=37)]
+UsagePath = Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){0,7}$", max_length=160)]
+ProviderIdentityTag = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$", max_length=200)]
+
+
+class ReservationTerms(Model):
+    """Operator-supplied prices and bounds; this model supplies no tariff or entitlement."""
+    schema_version: Literal[1] = 1
+    mode: Literal["mock", "live"]
+    component: Literal["native", "stt", "tts", "canned"]
+    model: ProviderIdentityTag
+    currency: Literal["USD"]
+    price_version: Annotated[str, Field(min_length=1, max_length=200)]
+    pricing_reference: Annotated[str, Field(min_length=1, max_length=200)]
+    capability_reference: Annotated[str, Field(min_length=1, max_length=200)]
+    enforcement_reference: Annotated[str, Field(min_length=1, max_length=200)]
+    bound_usd: DecimalText
+    basis: Annotated[str, Field(min_length=1, max_length=500)]
+    rate_unit: Literal["USD_per_unit"] = "USD_per_unit"
+    rates: Annotated[dict[UsagePath, DecimalText], Field(min_length=1, max_length=32)]
+    usage_bounds: Annotated[dict[UsagePath, DecimalText], Field(min_length=1, max_length=32)]
+    usage_units: dict[UsagePath, Literal["tokens", "seconds", "requests", "samples"]]
+
+    @model_validator(mode="after")
+    def consistent_bound(self) -> ReservationTerms:
+        if set(self.rates) != set(self.usage_bounds) or set(self.rates) != set(self.usage_units):
+            raise ValueError("price_bound_dimensions_must_match")
+        if any(other.startswith(path + ".") for path in self.rates for other in self.rates if other != path):
+            raise ValueError("overlapping_usage_paths")
+        with localcontext() as context:
+            context.prec = 96
+            maximum = Decimal(0)
+            for path, rate in self.rates.items():
+                units = Decimal(self.usage_bounds[path])
+                if self.usage_units[path] != "seconds" and units != units.to_integral_value():
+                    raise ValueError("discrete_usage_bound_required")
+                if self.mode == "live" and units <= 0:
+                    raise ValueError("positive_live_usage_bound_required")
+                maximum += Decimal(rate) * units
+            bound = Decimal(self.bound_usd)
+            if maximum > bound or (self.mode == "live" and bound <= 0):
+                raise ValueError("reservation_does_not_cover_declared_usage_bounds")
+            if self.mode == "mock" and (bound != 0 or maximum != 0 or self.price_version != "mock-zero-v1"):
+                raise ValueError("mock_requires_explicit_zero_provider_basis")
+        return self
+
+
+class ReturnedIdentity(Model):
+    value: ProviderIdentityTag | None = None
+    observation: Literal["observed", "unknown"] = "unknown"
+    source: Literal["provider_session_updated", "unknown"] = "unknown"
+
+    @model_validator(mode="after")
+    def observed_value_required(self) -> ReturnedIdentity:
+        if (self.observation == "observed") != (self.value is not None and self.source == "provider_session_updated"):
+            raise ValueError("returned_identity_observation_mismatch")
+        if self.observation == "unknown" and (self.value is not None or self.source != "unknown"):
+            raise ValueError("unknown_returned_identity_has_no_value")
+        return self
+
+
+class BudgetOwnerEvidence(Model):
+    scope: Literal["single_owner_run", "mock_local_run", "unknown"]
+    owner_id: Identifier
+    lease_reference: Annotated[str | None, Field(max_length=200)] = None
+    lease_observation: Literal["operator_attestation", "unknown"]
+    lease_verified: Literal["unknown"] = "unknown"
+
+
+class AdmissionEvidence(Model):
+    schema_version: Literal[1] = 1
+    mode: Literal["mock", "live"]
+    run_id: Identifier
+    run_manifest_hash: Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")] = None
+    manifest_hashes: dict[Literal["capabilities", "pricing", "authorization", "rights"], Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")]]
+    fingerprint_observation: Literal["operator_configuration_fingerprint"] = "operator_configuration_fingerprint"
+    requested_models: dict[Literal["native", "stt", "tts"], ProviderIdentityTag]
+    expected_returned_models: dict[Literal["native", "stt", "tts"], ProviderIdentityTag]
+    actually_returned_models: dict[Literal["native", "stt", "tts"], ReturnedIdentity]
+    requested_voice: ProviderIdentityTag | None = None
+    actually_returned_voice: ReturnedIdentity = Field(default_factory=ReturnedIdentity)
+    budget_usd: DecimalText
+    budget_owner: BudgetOwnerEvidence
+    independent_verification: Literal["unknown"] = "unknown"
 
 
 class Hello(Model):
@@ -260,6 +347,13 @@ class Attempt(Model):
     units: dict[str, str] = Field(default_factory=dict)
     usage_source: str | None = None
     terminal_reason: str | None = None
+    trial_id: Identifier | None = None
+    owner_id: Identifier | None = None
+    dispatch_authorized: bool | None = None
+    dispatched: bool | None = None
+    started: bool | None = None
+    reservation_terms: ReservationTerms | None = None
+    transport_source: Literal["provider_network", "injected_unverified"] | None = None
 
 
 class TurnResult(Model):

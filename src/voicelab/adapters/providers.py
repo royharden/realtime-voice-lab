@@ -10,12 +10,20 @@ import json
 
 
 def _object(raw: str) -> dict:
-    if len(raw.encode('utf-8')) > 131072:
-        raise ValueError('provider frame too large')
-    value = json.loads(raw)
-    if not isinstance(value, dict) or not isinstance(value.get('type'), str):
-        raise ValueError('malformed provider frame')
+    try:
+        if not isinstance(raw, str) or len(raw.encode('utf-8')) > 131072:
+            raise ValueError
+        value = json.loads(raw)
+        if not isinstance(value, dict) or not isinstance(value.get('type'), str) or not 1 <= len(value['type']) <= 160:
+            raise ValueError
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise ValueError('provider_protocol_error') from None
     return value
+
+
+def parse_provider_object(raw: str) -> dict:
+    """Bound control/data JSON before any live negotiation or event inspection."""
+    return _object(raw)
 
 
 def pcm_chunk(data: bytes, *, sample_rate: int = 24000) -> dict:

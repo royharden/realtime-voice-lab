@@ -109,6 +109,22 @@ Snapshot failures remain unknown. Clock probes only echo bounded browser values 
 server receive/send observations, each with its clock/boundary/boot identity. No
 one-way-delay arithmetic or actual process restart is inferred from these controls.
 
+Accounting admission now stores typed per-attempt price/bound terms, trial and boot
+owner beside the existing immutable attempt row. Reserve/dispatch policy checks,
+three-attempt component limits and late over-bound usage serialize through the same
+ledger. A bound violation halts even after unknown/settled terminals; it never refunds
+unknown exposure or settles twice. Boot recovery retains unfinished exposure and
+fences stale owner objects. Live enforcement/lease references are operator attestations;
+the actual bound verifier/provider evidence is a separate unbuilt activation prerequisite.
+
+Protected admission metadata fingerprints operator configuration without provider I/O.
+Ready/session metadata separates requested/expected identities from returned identities
+observed only through a future gated provider open. Injected transports, unreturned TTS/
+voice identities and independent verification stay unknown. Boundary helpers reject
+ambiguous loopback/Origin/nonce authorities and current filesystem link/traversal escapes;
+operator-exclusive artifact ownership is required. Errors and accounting telemetry retain
+fixed codes/numeric counters rather than raw provider content or request validation inputs.
+
 Later validation must exercise full browser→relay→wire parser→authority→playback→ledger
 journeys, cancellation, reconnect and cleanup, before offline evidence is admissible.
 Licensed fixtures, calibration, independent heldout custody, approved provider/budget

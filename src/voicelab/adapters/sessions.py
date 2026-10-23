@@ -207,14 +207,16 @@ class MockArmSession:
         attempt_id = 'at-' + hashlib.sha256(f'{self.namespace}:{self.arm}:{turn_id}:{self.attempt}'.encode()).hexdigest()[:32]
         components = {'V': ['native'], 'C': ['stt', 'tts'], 'K': ['canned']}[self.arm]
         reserved = []
-        for component in components:
-            component_id = attempt_id + '-' + component
-            self.ledger.reserve(component_id, amount=Decimal('0'), logical_turn_id=logical_turn_id,
-                                arm=self.arm, component=component, price_version='mock-zero-v1',
-                                basis='No provider egress; diagnostic synthetic mock only')
-            reserved.append(component_id)
         response_id = 'r-' + hashlib.sha256(f'{turn_id}:{self.attempt}'.encode()).hexdigest()[:32]
         try:
+            for component in components:
+                component_id = attempt_id + '-' + component
+                self.ledger.reserve(component_id, amount=Decimal('0'), logical_turn_id=logical_turn_id,
+                                    arm=self.arm, component=component, price_version='mock-zero-v1',
+                                    basis='No provider egress; diagnostic synthetic mock only', trial_id=self.namespace)
+                reserved.append(component_id)
+            for component_id in reserved:
+                self.ledger.authorize_dispatch(component_id)
             if self.arm in {'V', 'C'}:
                 serialize_command('commit')
             transcript = mock_transcript(self.arm, self.text, turn_id)
@@ -290,7 +292,7 @@ class MockArmSession:
                               'response_id': response_id, 'spoken_correctness': 'unknown'})
         except BaseException:
             for component_id in reserved:
-                self.ledger.mark_unknown(component_id, reason='mock attempt aborted before terminal settlement')
+                self.ledger.mark_unknown(component_id, reason='dispatch_outcome_unknown')
             raise
         finally:
             self.text = ''

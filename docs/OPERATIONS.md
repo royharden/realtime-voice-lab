@@ -222,6 +222,67 @@ IDs or exhausted allowance end with a protocol error. The browser may calculate 
 bounded clock diagnostic from saved observations, but server receipt/send are not
 browser receipt, speech end or physical audio output. All these paths remain unrun.
 
+## Accounting and boundary completion source
+
+The late-bound fix applies to reserved, settled and terminal-unknown attempts. An
+authoritative amount exceeding its reservation atomically records invalid-bound
+evidence and halts new reservations/dispatch. Unknown exposure and original settlements
+remain immutable; duplicate/late evidence cannot charge or refund twice. The ledger's
+old total is still known settlements plus held reservations, not a complete external
+bill after a bound is disproved. Check admission_halted, bound_integrity and bound
+violation counts; a null dispatch_allowed is not an affordability grant.
+
+Billable reservations require canonical ReservationTerms with explicitly supplied
+known per-unit USD rates, matching maximum-usage/unit dimensions, model/version/basis
+and pricing/capability/enforcement references. The code supplies no tariff. Bounds
+must cover the exact declared maximum; discrete units must be integers. Supported
+amount strings have at most 18 integer and 18 fractional digits; unsupported actual
+amounts halt as unknown instead of rounding or accepting an unsafe bill. Missing usage
+stays unknown, and only priced numeric counters enter events. Raw text/audio/keys are
+not saved as usage. A component can reserve at most three attempts per trial/logical
+turn/arm, including canceled/unknown retries.
+
+The existing reserve/settle APIs remain with additive source methods/metadata.
+Live reserve adds terms/trial/boot owner; mock-zero-v1 remains the keyless zero-cost
+case. authorize_dispatch and ensure_dispatch_allowed check the persisted halt/owner
+and active reservation before billable I/O. A grant is not remote execution or charge
+proof. record_sent means the transport send returned; failures before a returned send
+remain unknown about remote charge. A future sole artifact-root startup may explicitly
+recover the new boot owner; unfinished prior reservations become service_restart/
+unknown, with exposure held. Ordinary per-session constructors cannot steal ownership
+back. Budget mismatch refuses and never rewrites journals or resets a halt.
+
+Actual unbuilt live activation prerequisites include a synchronous injected
+attempt_bound_verifier that verifies the supplied terms against real provider/session/
+history controls and lease context, plus real dimensioned tariff/usage_bounds/
+usage_units/enforcement_reference and capability/owner evidence. No permissive
+verifier or approved example is installed. The existing supported TTS, licensed K,
+rights/custody/calibration, prices/budget and credentials remain separate prerequisites.
+The new source contracts do not guarantee any external bill. Runtime refusal,
+concurrency, crash atomicity and error-before/after-charge behavior remain untested.
+
+GET /admission uses the exact Host/Origin/X-Voicelab-Nonce boundary and returns per-arm
+AdmissionEvidence. Ready.payload.admission and saved session admission use the same
+typed shape; see contracts/INTERFACES.md and admission-evidence-v1.json. It exposes
+mode/run/run-manifest links, manifest fingerprints, requested/expected/actually-returned
+identities, budget-owner scope/boot and lease reference. Hashes and lease references
+are operator attestations, not independent verification. Metadata GET never contacts a
+provider. Before future open, actually-returned identities are unknown; only default
+provider transport session.updated observations can populate returned models. Injected
+transports and unreturned TTS/voice fields remain unknown. No raw policy or credential
+is included.
+
+Boundary Origin must itself be exact loopback HTTP with an explicit port; Host must
+be one unambiguous ASCII loopback authority. Nonce is 16..128 URL-safe ASCII characters.
+Duplicate boundary headers or query nonces refuse. HTTP errors use fixed structured
+detail.code/error.code without echoing validation inputs. Artifact root/ancestors and
+children cannot currently be symlinks/junctions, linked files, traversal, drives/UNC,
+ADS or reserved-name escapes. Keep the root under one operator with no competing
+filesystem writer; these source checks do not prove race-free filesystem replacement.
+The later listener must additionally bound transport frames to the application limit
+and suppress/redact URL access logging, because the WebSocket query carries its local
+nonce. Those root-listener settings are owned by the Integrator; no listener ran here.
+
 `VOICELAB_ARTIFACT_ROOT` selects local runtime artifacts (default `.agent-work/runtime`
 relative to activation cwd). Startup creates task/attempt SQLite files and bounded
 metadata traces there. Use an operator-controlled directory, outside public exports;

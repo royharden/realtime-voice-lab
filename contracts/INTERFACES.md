@@ -123,3 +123,82 @@ clock domain, boot ID and receive/send boundary labels. At most 20 probes per se
 including legacy pings; duplicate IDs/sequences or overflow refuse as protocol errors.
 Server received means the validated probe handler; sent means dispatch inside the
 send lock, not remote receipt. No one-way delay or mixed-clock subtraction is computed.
+
+## Accounting and admission boundary source
+
+`ReservationTerms` is the canonical known-price source contract: mode, component,
+requested model, USD currency, price version, pricing/capability/enforcement references,
+bound_usd, basis, rate_unit=USD_per_unit, rates/usage_bounds/usage_units with identical
+nonoverlapping usage paths. Decimal strings are plain finite nonnegative numbers,
+up to 18 integer and 18 fractional digits. Live bounds are positive and must cover
+the exact sum of declared per-unit rates times maximum usage. No rates are supplied.
+
+Ledger reserve keeps its named arguments and adds optional terms/trial_id. A live
+reservation requires terms, trial and boot owner; the explicit mock-zero-v1/no-egress
+case remains compatible. Three component attempts per trial/logical turn/arm are
+counted durably, including canceled and unknown attempts. `authorize_dispatch` is
+the atomic policy point before a transport call; `ensure_dispatch_allowed` rechecks
+halt/owner/active reservation. Authorization is not dispatch/remote charge evidence.
+`record_sent` records only a returned transport send. Raw attempts retain optional
+trial_id/owner_id/reservation_terms/dispatch_authorized/dispatched/started metadata;
+unset dispatch observations stay null. Errors before/after a possible charge retain
+unknown exposure, not an inferred zero refund.
+Dispatch observations retain the exact boundary (WebSocket send return or first TTS
+PCM) and transport_source. Injected transports cannot assert a provider dispatch,
+returned identity or authoritative usage. Live price-version/component term fingerprints
+are immutable within the run; a changed tariff/model/bound requires a new run/cohort.
+
+`settle_usage` computes from the immutable saved terms and retains only priced numeric
+counters. Missing/invalid usage stays unknown. Settlement checks over-bound amounts
+in reserved, settled AND unknown states under the same write transaction as the
+halt/evidence. Late/duplicate usage never changes a terminal row or charges twice.
+Late evidence greater than an unknown reservation invalidates its bound and halts
+further reservation/dispatch; it does not reconcile that immutable unknown exposure.
+The old total_exposure definition therefore stays known settlements plus held
+reservations, not a complete bill after a bound violation. Added summary fields:
+bound_integrity (invalid/not_disproved), bound_violation_count (observations),
+bound_violation_attempt_count, dispatch_halt_active, dispatch_allowed (false/null),
+owner_id and snapshot_owner_id. No-halt/null is not an affordability grant. Raw
+attempts/events/totals still come from the same ledger read transaction and saved
+snapshot codec; there is no parallel cost sum.
+price_policy_fingerprints links the saved per-component terms without duplicating totals.
+
+The sole artifact-root startup explicitly recovers a new boot owner. Prior reserved
+attempts become immutable unknown/service_restart, retaining exposure. Per-session
+constructors cannot reclaim a newer boot's owner; budget mismatch refuses instead
+of rewriting history. A live single-owner lease reference remains an operator
+attestation, not an independent process/lease proof.
+
+Protected `GET /admission` returns `{schema_version:1,mode,arms:{arm:AdmissionEvidence},
+observation_scope:"configuration_only_no_provider_probe",runtime_verified:false}`.
+Ready.payload.admission and session evidence.admission use the same canonical
+AdmissionEvidence (`admission-evidence-v1.json` is its source reference): mode/run ID,
+run-manifest hash; capability/pricing/authorization/rights manifest hashes; requested
+models/voice; expected returned models; actually_returned_models/voice observation
+objects; budget_usd; budget_owner scope/boot owner/lease reference with observation;
+independent_verification=unknown. GET only fingerprints configuration. Before open,
+actual identities are null/unknown. Only a successful future default-provider-transport
+session.updated supplies observed returned model data; injected transports and TTS/
+voice identities not actually returned remain unknown. No keys, raw policies or
+provider probe is used to fill metadata. Configuration fingerprints and references
+are links/attestations, not independent acceptance.
+
+Live producer source additionally requires tariff usage_bounds/usage_units/
+enforcement_reference, capabilities.attempt_bounds_verified, authorization
+budget_owner_scope=single_owner_run and owner_lease_reference, and an operator-injected
+synchronous attempt_bound_verifier returning literal true on the typed terms/current
+sample/outgoing-byte-count/epoch/owner context before each billable call. Byte counts
+are not relabeled tokens or prices. This actual verifier and its
+provider/session/history enforcement evidence are unbuilt activation prerequisites;
+the product supplies no permissive verifier. Existing rights/custody/calibration,
+supported TTS, credentials/transports and approved-price/budget prerequisites remain.
+
+Boundary failures return fixed structured HTTP `{detail:{code},error:{code}}`;
+WebSocket failures retain their fixed code/outcome envelope. Host syntax is ASCII
+loopback only, exact configured frontend Origin requires loopback http plus port,
+and nonce is 16..128 URL-safe ASCII characters. Duplicate boundary headers/query
+nonces refuse. Artifact paths normalize separators, reject absolute/rooted/drive/
+traversal/ADS/reserved names, current root/child symlink/junction/hardlink escapes
+and output outside the configured root. Use an operator-owned root with no competing
+filesystem writer; atomic protection against concurrent link replacement is not
+claimed. Provider errors/usage telemetry omit raw credentials/audio/transcript text.

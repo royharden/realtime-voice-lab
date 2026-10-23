@@ -8,22 +8,24 @@ from dataclasses import dataclass
 from decimal import Decimal
 import hmac
 import hashlib
-import ipaddress
 import os
 from pathlib import Path
 import secrets
 import time
 from typing import Any
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import TypeAdapter
 
-from voicelab.accounting.ledger import AttemptLedger, BudgetRefused
+from voicelab.accounting.ledger import AttemptLedger, BUDGET_REFUSAL_CODES, BudgetRefused
 from voicelab.adapters import create_arm
 from voicelab.adapters.live import validate_live_config
-from voicelab.contracts import Audio, ClientStatus, ClockProbe, Commit, End, Hash, Hello, Identifier, Interrupt, MockFaultControl, MockFaultPolicy, MockFaultReceipt, Ping, Rendered, Resume, ServerMessage, parse_client, serialize_server
+from voicelab.adapters.transport import ProviderFailure
+from voicelab.core.admission import admission_evidence
+from voicelab.contracts import Audio, ClientStatus, ClockProbe, Commit, End, Hash, Hello, Identifier, Interrupt, MAX_MESSAGE_BYTES, MockFaultControl, MockFaultPolicy, MockFaultReceipt, Ping, Rendered, Resume, ServerMessage, parse_client, serialize_server
 from voicelab.core.faults import FaultRefused, MockFaultController
 from voicelab.core.journal import LifecycleJournal
 from voicelab.core.session import Admission, SessionState, SessionViolation
@@ -31,13 +33,15 @@ from voicelab.core.retention import RetentionManifest, TrialRetention
 from voicelab.core.task import TaskAuthority
 from voicelab.core.trace import TraceWriter, store_pcm
 from voicelab.core.snapshots import read_snapshot, save_snapshot
-from voicelab.security import safe_artifact_path, validate_boundary
+from voicelab.security import SecurityRefused, safe_artifact_path, validate_boundary, validate_host, validate_nonce, validate_origin
 
 EVIDENCE_LABEL = "keyless mock — diagnostic synthetic tone; no spoken-task acceptance"
 LIVE_EVIDENCE_LABEL = "authorized live source — runtime unverified; independent acceptance pending"
 
 
 def failure_outcome(code: str) -> str:
+    if code in BUDGET_REFUSAL_CODES:
+        return "budget_halt"
     if code in {"silence_timeout", "permission_denied", "device_lost", "service_restart", "transport_loss", "abandoned", "unsupported_audio", "calibration_invalid"}:
         return code
     if code in {"invalid_audio_samples", "invalid_adapter_audio"}:
@@ -52,7 +56,7 @@ def failure_outcome(code: str) -> str:
         return "recovery_unknown"
     if code in {"task_deadline", "turn_limit"}:
         return "task_failure"
-    if code in {"provider_error", "adapter_failure", "provider_or_transport_failure", "missing_response_audio"}:
+    if code in {"provider_error", "provider_transport_error", "provider_redirect_refused", "provider_protocol_error", "adapter_failure", "provider_or_transport_failure", "missing_response_audio"}:
         return "provider_error"
     return "protocol_error"
 
@@ -60,17 +64,19 @@ def failure_outcome(code: str) -> str:
 def exception_code(exc: Exception) -> str:
     """Never copy provider messages, transcripts, paths or credentials into telemetry."""
     if isinstance(exc, BudgetRefused):
-        return "budget_exhausted"
+        return exc.code
+    if isinstance(exc, ProviderFailure):
+        return exc.code
+    if isinstance(exc, SecurityRefused):
+        return "boundary_refused"
     if isinstance(exc, asyncio.TimeoutError):
         return "provider_timeout"
     if isinstance(exc, asyncio.QueueFull):
         return "queue_overrun"
     if isinstance(exc, SessionViolation):
         return str(exc)
-    if isinstance(exc, ValueError) and str(exc) in {"provider_timeout", "provider_error", "trace_closed_or_overflow"}:
+    if isinstance(exc, ValueError) and str(exc) in {"provider_timeout", "provider_error", "provider_protocol_error", "trace_closed_or_overflow", "recovery_unknown"}:
         return str(exc)
-    if isinstance(exc, ValueError) and "recovery_unknown" in str(exc):
-        return "recovery_unknown"
     return "adapter_failure"
 
 
@@ -90,8 +96,10 @@ class Settings:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings(nonce=os.environ.get("VOICELAB_NONCE", ""), allowed_origin=os.environ.get("VOICELAB_ALLOWED_ORIGIN", ""), artifact_root=Path(os.environ.get("VOICELAB_ARTIFACT_ROOT", ".agent-work/runtime")))
-    if settings.mode not in {"mock", "live"} or not 16 <= len(settings.nonce) <= 128:
-        raise ValueError("relay requires explicit mode and VOICELAB_NONCE of 16..128 characters")
+    if settings.mode not in {"mock", "live"}:
+        raise ValueError("relay_configuration_refused")
+    validate_nonce(settings.nonce)
+    validate_origin(settings.allowed_origin)
     TypeAdapter(Identifier).validate_python(settings.run_id)
     if settings.run_manifest_hash is not None:
         TypeAdapter(Hash).validate_python(settings.run_manifest_hash)
@@ -119,14 +127,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ValueError("retention_run_arm_or_trial_identity_conflict")
         trial_ids.add(manifest.trial_id)
         retention_by_arm[manifest.arm].append(manifest)
-    origin = urlsplit(settings.allowed_origin)
-    try:
-        local = origin.hostname == "localhost" or ipaddress.ip_address(origin.hostname or "").is_loopback
-        valid = local and origin.scheme == "http" and origin.port is not None and not any((origin.path, origin.query, origin.fragment, origin.username, origin.password))
-    except ValueError:
-        valid = False
-    if not valid:
-        raise ValueError("VOICELAB_ALLOWED_ORIGIN must be an explicit exact loopback http origin with port")
     admission = Admission(3)
     sessions: dict[str, Relay] = {}
     boot_id = "boot-" + secrets.token_hex(12)
@@ -141,6 +141,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.artifact_root.mkdir(parents=True, exist_ok=True)
         journal = LifecycleJournal(safe_artifact_path(settings.artifact_root, "task.sqlite3"))
         journal.recover(boot_id)
+        # Sole artifact-root owner explicitly reclaims prior-boot reservations once.
+        # Per-session constructors cannot steal ownership back from a newer boot.
+        budgets = ({entry['run_id']: Decimal(entry['budget_usd']) for entry in live_configs.values()}
+                   if settings.mode == 'live' else {settings.run_id: Decimal('0')})
+        for run_id, budget in budgets.items():
+            AttemptLedger(safe_artifact_path(settings.artifact_root, f'attempts-{run_id}.sqlite3'),
+                          budget, owner_id=boot_id, recover_owner=True)
         try:
             yield
         finally:
@@ -149,11 +156,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title=f"Realtime Voice Lab — {settings.mode}", lifespan=lifespan)
 
+    @app.middleware('http')
+    async def loopback_host_only(request: Request, call_next):
+        try:
+            if len(request.headers.getlist('host')) != 1:
+                raise SecurityRefused('ambiguous_boundary_headers')
+            validate_host(request.headers.get('host', ''))
+        except ValueError:
+            return JSONResponse(status_code=403, content={'detail': {'code': 'boundary_refused'}, 'error': {'code': 'boundary_refused'}})
+        return await call_next(request)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def fixed_http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # Internal HTTP details are fixed strings/codes; do not forward validation inputs.
+        detail = exc.detail
+        code = detail.get('code') if isinstance(detail, dict) else detail
+        if not isinstance(code, str) or not code.isascii() or not code.replace('_', '').isalnum() or len(code) > 96 or ' ' in code:
+            code = 'request_refused'
+        return JSONResponse(status_code=exc.status_code, content={'detail': {'code': code}, 'error': {'code': code}})
+
+    @app.exception_handler(RequestValidationError)
+    async def fixed_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={'detail': {'code': 'invalid_request'}, 'error': {'code': 'invalid_request'}})
+
+    @app.exception_handler(Exception)
+    async def fixed_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=500, content={'detail': {'code': 'internal_error'}, 'error': {'code': 'internal_error'}})
+
     def authorize(request: Request) -> None:
         try:
+            if any(len(request.headers.getlist(name)) != 1 for name in ('host', 'origin', 'x-voicelab-nonce')):
+                raise SecurityRefused('ambiguous_boundary_headers')
             validate_boundary(request.headers.get("host", ""), request.headers.get("origin", ""), request.headers.get("x-voicelab-nonce", ""), settings.nonce, settings.allowed_origin)
         except ValueError as exc:
-            raise HTTPException(status_code=403, detail="local boundary refused") from exc
+            raise HTTPException(status_code=403, detail={'code': 'boundary_refused'}) from None
+
+    @app.get('/admission')
+    async def configured_admission(request: Request) -> dict[str, object]:
+        authorize(request)
+        arms = live_configs if settings.mode == 'live' else {'V': None, 'C': None, 'K': None}
+        return {'schema_version': 1, 'mode': settings.mode, 'arms': {
+            arm: admission_evidence(mode=settings.mode,
+                run_id=config['run_id'] if config else settings.run_id,
+                run_manifest_hash=settings.run_manifest_hash, owner_id=boot_id, config=config)
+            for arm, config in arms.items()},
+            'observation_scope': 'configuration_only_no_provider_probe', 'runtime_verified': False}
 
     @app.get("/sessions/{session_id}/evidence")
     async def session_evidence(session_id: str, request: Request) -> dict[str, object]:
@@ -201,7 +248,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             control = MockFaultControl.model_validate_json(bytes(raw))
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="invalid_closed_fault_control") from exc
+            raise HTTPException(status_code=400, detail="invalid_closed_fault_control") from None
         # Body streaming yielded; recheck that the target still admits controls.
         if relay.state.closed or sessions.get(session_id) is not relay:
             raise HTTPException(status_code=409, detail="fault_target_not_active")
@@ -283,6 +330,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def websocket(socket: WebSocket) -> None:
         # Never echo query values or nonce in errors. Validate before socket admission.
         try:
+            if any(len(socket.headers.getlist(name)) != 1 for name in ('host', 'origin')) or len(socket.query_params.getlist('nonce')) != 1:
+                raise SecurityRefused('ambiguous_boundary_headers')
             validate_boundary(socket.headers.get("host", ""), socket.headers.get("origin", ""), socket.query_params.get("nonce", ""), settings.nonce, settings.allowed_origin)
         except ValueError:
             await socket.close(code=1008, reason="local boundary refused")
@@ -291,7 +340,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         relay: Relay | None = None
         resumed = False
         try:
-            first = parse_client(await asyncio.wait_for(socket.receive_text(), timeout=5))
+            try:
+                first = parse_client(await receive_bounded(socket, timeout=5))
+            except ValueError:
+                raise SessionViolation('malformed_protocol') from None
             if not isinstance(first, Hello) or not hmac.compare_digest(first.nonce.encode(), settings.nonce.encode()):
                 raise SessionViolation("hello_required")
             if first.mode != settings.mode or (first.mode == "live" and first.arm not in live_configs):
@@ -306,7 +358,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 relay.state.state = "reconnecting"
                 relay.socket = socket
                 resumed = True
-                await relay.send("ready", {"mode": settings.mode, "arm": first.arm, "evidence_label": evidence_label, "trial_namespace": relay.state.trial_namespace, "resume_required": True, "run_id": relay.run_id, "trial_id": relay.state.trial_namespace, "boot_id": boot_id, "evidence_reference": f"/sessions/{relay.state.session_id}/evidence"})
+                await relay.send("ready", {"mode": settings.mode, "arm": first.arm, "evidence_label": evidence_label, "trial_namespace": relay.state.trial_namespace, "resume_required": True, "run_id": relay.run_id, "trial_id": relay.state.trial_namespace, "boot_id": boot_id, "admission": relay.admission_metadata, "evidence_reference": f"/sessions/{relay.state.session_id}/evidence"})
             else:
                 identifier = "s-" + secrets.token_hex(12)
                 admission.admit(identifier)
@@ -322,7 +374,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             while not relay.state.closed:
                 remaining = max(0.01, 120 - (time.monotonic_ns() - relay.state.started_ns) / 1e9)
                 try:
-                    payload = await asyncio.wait_for(socket.receive_text(), timeout=min(1, remaining))
+                    payload = await receive_bounded(socket, timeout=min(1, remaining))
                 except asyncio.TimeoutError:
                     # Watchdog owns state-specific deadlines, including quiet playback.
                     continue
@@ -331,7 +383,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     message = parse_client(payload)
                 except ValueError as exc:
-                    raise SessionViolation("malformed_protocol") from exc
+                    raise SessionViolation("malformed_protocol") from None
                 if resumed and not isinstance(message, (Resume, End)):
                     raise SessionViolation("resume_required")
                 await relay.receive(message)
@@ -346,6 +398,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await relay.fail(exception_code(exc))
             else:
                 await socket.close(code=1008, reason="admission refused")
+
+    async def receive_bounded(socket: WebSocket, *, timeout: float) -> str:
+        message = await asyncio.wait_for(socket.receive(), timeout=timeout)
+        if message.get('type') == 'websocket.disconnect':
+            raise WebSocketDisconnect()
+        text = message.get('text')
+        if message.get('type') != 'websocket.receive' or not isinstance(text, str):
+            raise SessionViolation('malformed_protocol')
+        try:
+            if len(text.encode('utf-8')) > MAX_MESSAGE_BYTES:
+                raise SessionViolation('message_too_large')
+        except UnicodeError:
+            raise SessionViolation('malformed_protocol') from None
+        return text
 
     # Expiration owns only this factory's admitted sessions, never other processes.
     async def expire(relay: Relay) -> None:
@@ -374,10 +440,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ledger_name = f"attempts-{run_id}.sqlite3"
             self.authority = TaskAuthority(safe_artifact_path(config.artifact_root, "task.sqlite3"))
             try:
-                self.ledger = AttemptLedger(safe_artifact_path(config.artifact_root, ledger_name), budget)
+                self.ledger = AttemptLedger(safe_artifact_path(config.artifact_root, ledger_name), budget, owner_id=boot_id)
                 self.adapter = create_arm(state.arm, task_authority=self.authority, trial_namespace=state.trial_namespace, ledger=self.ledger, config=self.adapter_config)
                 self.trace = TraceWriter(safe_artifact_path(config.artifact_root, "traces"), state.session_id, state.trial_namespace, state.arm, run_id=run_id, boot_id=boot_id)
                 self.journal.start(session_id=state.session_id, run_id=run_id, trial_id=state.trial_namespace, arm=state.arm, mode=config.mode, boot_id=boot_id, started_ns=state.started_ns, run_manifest_hash=config.run_manifest_hash)
+                self.admission_metadata = admission_evidence(mode=config.mode, run_id=run_id,
+                    run_manifest_hash=config.run_manifest_hash, owner_id=boot_id,
+                    config=self.adapter_config if config.mode == 'live' else None)
+                self.journal.admission(state.session_id, self.admission_metadata)
             except BaseException:
                 if hasattr(self, "trace"):
                     self.trace.close()
@@ -440,7 +510,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return
             self.state._listen()
             self.authority.set_epoch(self.state.trial_namespace, 0)
-            await self.send("ready", {"mode": self.settings.mode, "arm": self.state.arm, "evidence_label": evidence_label, "trial_namespace": self.state.trial_namespace, "run_id": self.run_id, "trial_id": self.state.trial_namespace, "boot_id": boot_id, "evidence_reference": f"/sessions/{self.state.session_id}/evidence"})
+            self.admission_metadata = admission_evidence(mode=self.settings.mode, run_id=self.run_id,
+                run_manifest_hash=self.settings.run_manifest_hash, owner_id=boot_id,
+                config=self.adapter_config if self.settings.mode == 'live' else None,
+                observed_models=getattr(self.adapter, 'observed_returned_models', {}))
+            self.journal.admission(self.state.session_id, self.admission_metadata)
+            await self.send("ready", {"mode": self.settings.mode, "arm": self.state.arm, "evidence_label": evidence_label, "trial_namespace": self.state.trial_namespace, "run_id": self.run_id, "trial_id": self.state.trial_namespace, "boot_id": boot_id, "admission": self.admission_metadata, "evidence_reference": f"/sessions/{self.state.session_id}/evidence"})
             await self.send("state", {"state": "listening"})
             self.sender = asyncio.create_task(self.pump())
 
