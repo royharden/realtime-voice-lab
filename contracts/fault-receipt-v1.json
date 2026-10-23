@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:voicelab:mock-fault-receipt:1",
+  "description": "Source reference for contracts.MockFaultReceipt, the canonical runtime model. Injection is simulated; armed/applied is not acceptance. Refusals are HTTP errors, not receipt statuses.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "run_id",
+    "trial_id",
+    "arm",
+    "boot_id",
+    "control_id",
+    "kind",
+    "seed",
+    "status",
+    "simulation",
+    "actual_process_restart",
+    "affected_boundary",
+    "authorization_reference",
+    "connection_epoch",
+    "response_epoch",
+    "server_timestamp_ns",
+    "clock_domain",
+    "request_count",
+    "injected_count",
+    "effect_observation",
+    "observed_terminal_outcome",
+    "parameters",
+    "details",
+    "applied_server_ns",
+    "applied_connection_epoch",
+    "applied_response_epoch"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "session_id": {
+      "$ref": "#/$defs/id"
+    },
+    "run_id": {
+      "$ref": "#/$defs/id"
+    },
+    "trial_id": {
+      "$ref": "#/$defs/id"
+    },
+    "arm": {
+      "enum": [
+        "V",
+        "C",
+        "K"
+      ]
+    },
+    "boot_id": {
+      "$ref": "#/$defs/id"
+    },
+    "control_id": {
+      "$ref": "#/$defs/id"
+    },
+    "kind": {
+      "enum": [
+        "late_pcm",
+        "duplicate_pcm",
+        "reordered_pcm",
+        "lost_ack",
+        "drop_before_commit",
+        "drop_after_commit",
+        "fresh_tool_duplicate",
+        "service_restart",
+        "provider_error",
+        "missing_audio",
+        "missing_transcript",
+        "queue_overrun"
+      ]
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "status": {
+      "enum": [
+        "armed",
+        "applied",
+        "unresolved"
+      ]
+    },
+    "simulation": {
+      "const": true
+    },
+    "actual_process_restart": {
+      "const": false
+    },
+    "affected_boundary": {
+      "enum": [
+        "mock_provider_pcm_queue",
+        "mock_provider_pcm_stream",
+        "mock_transcript_stream",
+        "relay_render_ack",
+        "mock_authority_effect",
+        "mock_proposal_parser_authority",
+        "owned_mock_session_lifecycle",
+        "mock_provider_error_parser"
+      ]
+    },
+    "authorization_reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "connection_epoch": {
+      "$ref": "#/$defs/epoch"
+    },
+    "response_epoch": {
+      "$ref": "#/$defs/epoch"
+    },
+    "server_timestamp_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "clock_domain": {
+      "const": "server_monotonic_ns"
+    },
+    "request_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "injected_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 128
+    },
+    "effect_observation": {
+      "enum": [
+        "observed",
+        "unknown"
+      ]
+    },
+    "observed_terminal_outcome": {
+      "enum": [
+        "success",
+        "task_failure",
+        "off_script",
+        "permission_denied",
+        "silence_timeout",
+        "device_lost",
+        "provider_error",
+        "provider_timeout",
+        "transport_loss",
+        "service_restart",
+        "abandoned",
+        "queue_overrun",
+        "calibration_invalid",
+        "budget_halt",
+        "expected_interruption",
+        "recovery_unknown",
+        "missing_terminal",
+        "protocol_error",
+        "unsupported_audio",
+        null
+      ]
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "details": {
+      "type": "object"
+    },
+    "applied_server_ns": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "applied_connection_epoch": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/epoch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "applied_response_epoch": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/epoch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "minLength": 1,
+      "maxLength": 96
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    }
+  }
+}

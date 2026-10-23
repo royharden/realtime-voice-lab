@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:voicelab:mock-fault-controls:1",
+  "description": "POST /sessions/{id}/faults; canonical runtime validation is contracts.MockFaultControl. Operator-enabled mock sessions only.",
+  "type": "object",
+  "required": ["control_id", "kind"],
+  "additionalProperties": false,
+  "properties": {
+    "control_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "minLength": 1, "maxLength": 96},
+    "kind": {"enum": ["late_pcm", "duplicate_pcm", "reordered_pcm", "lost_ack", "drop_before_commit", "drop_after_commit", "fresh_tool_duplicate", "service_restart", "provider_error", "missing_audio", "missing_transcript", "queue_overrun"]}
+  }
+}

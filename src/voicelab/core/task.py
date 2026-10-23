@@ -6,7 +6,7 @@ import json
 import secrets
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 SLOTS = ({"id": "slot-a", "label": "Tuesday 10:00 AM"}, {"id": "slot-b", "label": "Wednesday 2:00 PM"})
 COMMANDS = frozenset({"get_hours", "list_slots", "select_slot", "confirm_slot", "get_status"})
@@ -93,7 +93,7 @@ class TaskAuthority:
         booking = self.db.execute("SELECT * FROM task_bookings WHERE namespace=?", (trial_namespace,)).fetchone()
         return {"state": row["state"], "state_version": row["version"], "slot_id": row["slot_id"], "challenge": row["challenge"], "response_epoch": row["epoch"], "booking": dict(booking) if booking else None}
 
-    def execute(self, trial_namespace: str, command: str, arguments: dict[str, Any], *, logical_turn_id: str, response_epoch: int, explicit_confirmation: bool = False) -> dict[str, Any]:
+    def execute(self, trial_namespace: str, command: str, arguments: dict[str, Any], *, logical_turn_id: str, response_epoch: int, explicit_confirmation: bool = False, before_effect: Callable[[], bool] | None = None) -> dict[str, Any]:
         if command not in COMMANDS or not logical_turn_id or len(logical_turn_id) > 96:
             raise ValueError("invalid_task_command")
         if not isinstance(arguments, dict):
@@ -118,8 +118,11 @@ class TaskAuthority:
             elif response_epoch != row["epoch"]:
                 outcome = {"ok": False, "code": "stale_epoch", "logical_operation_id": operation}
             else:
-                outcome = self._apply(trial_namespace, row, command, arguments, logical_turn_id, response_epoch, explicit_confirmation, operation)
-                self.db.execute("INSERT INTO task_operations VALUES(?,?,?,?,?,?)", (trial_namespace, operation, logical_turn_id, command, encoded, json.dumps(outcome, sort_keys=True)))
+                outcome = self._apply(trial_namespace, row, command, arguments, logical_turn_id, response_epoch, explicit_confirmation, operation, before_effect)
+                # A mock drop before the effect has no original operation outcome yet.
+                # Retain its attempt; a reconnect retry may perform the same operation once.
+                if not outcome.get("retryable_no_effect"):
+                    self.db.execute("INSERT INTO task_operations VALUES(?,?,?,?,?,?)", (trial_namespace, operation, logical_turn_id, command, encoded, json.dumps(outcome, sort_keys=True)))
             self.db.execute("INSERT INTO task_attempts(namespace,operation_id,turn_id,command,epoch,duplicate,outcome) VALUES(?,?,?,?,?,?,?)", (trial_namespace, operation, logical_turn_id, command, response_epoch, int(duplicate), json.dumps(outcome, sort_keys=True)))
             self.db.execute("COMMIT")
             return {**outcome, "duplicate": duplicate}
@@ -127,7 +130,7 @@ class TaskAuthority:
             self.db.execute("ROLLBACK")
             raise
 
-    def _apply(self, ns: str, row: sqlite3.Row, command: str, args: dict[str, Any], turn: str, epoch: int, confirmed: bool, operation: str) -> dict[str, Any]:
+    def _apply(self, ns: str, row: sqlite3.Row, command: str, args: dict[str, Any], turn: str, epoch: int, confirmed: bool, operation: str, before_effect: Callable[[], bool] | None = None) -> dict[str, Any]:
         result: dict[str, Any] = {"ok": True, "logical_operation_id": operation}
         if command == "get_hours":
             result["hours"] = "Monday to Friday, 9:00 AM to 5:00 PM"
@@ -146,6 +149,10 @@ class TaskAuthority:
             if row["state"] != "awaiting_confirmation" or confirmed is not True or not row["selection_turn"] or turn == row["selection_turn"] or args.get("slot_id") != row["slot_id"] or args.get("challenge") != row["challenge"] or type(args.get("state_version")) is not int or args.get("state_version") != row["version"]:
                 result.update(ok=False, code="explicit_current_confirmation_required")
             else:
+                if before_effect is not None and before_effect() is False:
+                    result.update(ok=False, code="mock_drop_before_effect", retryable_no_effect=True)
+                    result.update(self.snapshot(ns))
+                    return result
                 self.db.execute("INSERT INTO task_bookings VALUES(?,?,?,?,?,?)", (ns, operation, row["slot_id"], turn, epoch, row["version"]))
                 self.db.execute("UPDATE task_trials SET state='booked',version=version+1,challenge=NULL WHERE namespace=?", (ns,))
                 result["effect_committed"] = True

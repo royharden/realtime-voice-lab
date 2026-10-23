@@ -91,6 +91,24 @@ durable. Observable controller spans keep their own explicit same-clock nanoseco
 bounds rather than substituting provider-private timing. Relay `success` describes
 the controller/render path or booked task state only; spoken correctness remains unknown.
 
+Mock-only operator fault policy composes `core.faults.MockFaultController` into the
+existing mock adapter. The HTTP control body has only a stable control ID and a closed
+kind. Source receipts distinguish arm, actual injection and unresolved boundaries;
+they retain seeded parameters, actual affected boundary and counts, never expected
+behavior as measured acceptance. Fresh tool duplicates use both the existing mock
+tool parser and durable authority, with distinct provider IDs and one logical operation.
+The before-effect hook can only prevent a guarded mock confirmation, after F1/version/
+epoch eligibility. Its retryable no-effect attempt does not replace an original operation.
+After-effect drop occurs after the actual task transaction. Both recover without replay.
+Simulated restart terminates only the target session with an explicit simulation source.
+
+The terminal path saves one existing atomic run-ledger summary, including raw attempts
+and events, as canonical hashed JSON; evidence GET verifies those saved bytes. A
+separate saved fault snapshot retains adapter queue/discard/authority/effect counters.
+Snapshot failures remain unknown. Clock probes only echo bounded browser values and
+server receive/send observations, each with its clock/boundary/boot identity. No
+one-way-delay arithmetic or actual process restart is inferred from these controls.
+
 Later validation must exercise full browser→relay→wire parser→authority→playback→ledger
 journeys, cancellation, reconnect and cleanup, before offline evidence is admissible.
 Licensed fixtures, calibration, independent heldout custody, approved provider/budget

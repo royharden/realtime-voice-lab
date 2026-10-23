@@ -85,13 +85,64 @@ class ClientStatus(Model):
     outcome: Literal["permission_denied", "device_lost", "silence_timeout", "abandoned", "unsupported_audio"]
 
 
+class ClockProbe(Model):
+    type: Literal["clock_probe"]
+    probe_id: Identifier
+    browser_sent_ms: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+
+
+FaultKind = Literal["late_pcm", "duplicate_pcm", "reordered_pcm", "lost_ack", "drop_before_commit", "drop_after_commit", "fresh_tool_duplicate", "service_restart", "provider_error", "missing_audio", "missing_transcript", "queue_overrun"]
+
+
+class MockFaultControl(Model):
+    control_id: Identifier
+    kind: FaultKind
+
+
+class MockFaultPolicy(Model):
+    enabled: Literal[True]
+    seed: Annotated[int, Field(strict=True, ge=0, le=2**32 - 1)]
+    authorization_reference: Annotated[str, Field(min_length=1, max_length=200)]
+    max_controls: Annotated[int, Field(strict=True, ge=1, le=32)] = 32
+
+
+class MockFaultReceipt(Model):
+    schema_version: Literal[1] = 1
+    session_id: Identifier
+    run_id: Identifier
+    trial_id: Identifier
+    arm: Literal["V", "C", "K"]
+    boot_id: Identifier
+    control_id: Identifier
+    kind: FaultKind
+    seed: Annotated[int, Field(strict=True, ge=0, le=2**32 - 1)]
+    status: Literal["armed", "applied", "unresolved"]
+    simulation: Literal[True]
+    actual_process_restart: Literal[False]
+    affected_boundary: Literal["mock_provider_pcm_queue", "mock_provider_pcm_stream", "mock_transcript_stream", "relay_render_ack", "mock_authority_effect", "mock_proposal_parser_authority", "owned_mock_session_lifecycle", "mock_provider_error_parser"]
+    authorization_reference: Annotated[str, Field(min_length=1, max_length=200)]
+    connection_epoch: Epoch
+    response_epoch: Epoch
+    server_timestamp_ns: Annotated[int, Field(strict=True, ge=0)]
+    clock_domain: Literal["server_monotonic_ns"]
+    request_count: Annotated[int, Field(strict=True, ge=1)]
+    injected_count: Annotated[int, Field(strict=True, ge=0, le=128)]
+    effect_observation: Literal["observed", "unknown"]
+    observed_terminal_outcome: TerminalOutcome | None = None
+    parameters: dict[str, int] = Field(default_factory=dict)
+    details: dict[str, object] = Field(default_factory=dict)
+    applied_server_ns: Annotated[int | None, Field(strict=True, ge=0)] = None
+    applied_connection_epoch: Epoch | None = None
+    applied_response_epoch: Epoch | None = None
+
+
 class Ping(Model):
     type: Literal["ping"]
     sequence: Annotated[int, Field(strict=True, ge=0, le=19)]
     browser_ms: Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
 
-ClientMessage = Annotated[Union[Hello, Audio, Commit, Interrupt, Rendered, Resume, End, ClientStatus, Ping], Field(discriminator="type")]
+ClientMessage = Annotated[Union[Hello, Audio, Commit, Interrupt, Rendered, Resume, End, ClientStatus, ClockProbe, Ping], Field(discriminator="type")]
 CLIENT_ADAPTER = TypeAdapter(ClientMessage)
 
 
@@ -115,7 +166,7 @@ class VoiceEvent(Model):
     connection_epoch: Epoch
     response_epoch: Epoch
     sequence: Annotated[int, Field(strict=True, ge=0)]
-    kind: Literal["session_started", "turn_started", "turn_ended", "audio_received", "commit_received", "transcript", "controller_start", "controller_end", "audio_sent", "rendered_ack", "cancel_dispatch", "fence_applied", "stale_discarded", "reconnect", "repeat_requested", "effect_commit", "provider_event", "integrity_error", "session_ended", "error"]
+    kind: Literal["session_started", "turn_started", "turn_ended", "fault_control", "clock_probe", "audio_received", "commit_received", "transcript", "controller_start", "controller_end", "audio_sent", "rendered_ack", "cancel_dispatch", "fence_applied", "stale_discarded", "reconnect", "repeat_requested", "effect_commit", "provider_event", "integrity_error", "session_ended", "error"]
     timestamp: Annotated[int | float, Field(ge=0, allow_inf_nan=False)]
     clock_domain: Literal["server_monotonic_ns", "browser_performance_ms", "audio_context_samples", "provider_unknown"]
     observation: Literal["observed", "estimated", "unknown"] = "observed"
@@ -125,11 +176,19 @@ class VoiceEvent(Model):
     artifact_hash: Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")] = None
     content_hash: Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")] = None
     terminal_outcome: TerminalOutcome | None = None
-    outcome_source: Literal["relay", "client_report", "restart_reconciliation"] | None = None
+    outcome_source: Literal["relay", "client_report", "restart_reconciliation", "mock_fault_simulation"] | None = None
     boot_id: Identifier | None = None
     span_start_ns: Annotated[int | None, Field(strict=True, ge=0)] = None
     span_end_ns: Annotated[int | None, Field(strict=True, ge=0)] = None
     span_clock_domain: Literal["server_monotonic_ns"] | None = None
+    control_id: Identifier | None = None
+    fault_kind: FaultKind | None = None
+    fault_status: Literal["armed", "applied", "unresolved"] | None = None
+    simulation: bool | None = None
+    affected_boundary: Annotated[str | None, Field(max_length=96)] = None
+    injected_count: Annotated[int | None, Field(strict=True, ge=0, le=128)] = None
+    provider_tool_id: Identifier | None = None
+    provider_transport_id: Identifier | None = None
 
     @model_validator(mode="after")
     def integrity(self) -> VoiceEvent:
@@ -147,7 +206,7 @@ class VoiceEvent(Model):
 
 class ServerMessage(Model):
     """Envelope; payload type is explicit and all emissions use this serializer."""
-    type: Literal["ready", "state", "transcript", "audio", "event", "task", "error", "ended", "pong"]
+    type: Literal["ready", "state", "transcript", "audio", "event", "task", "error", "ended", "pong", "clock_pong"]
     protocol_version: Literal[1] = 1
     session_id: Identifier
     connection_epoch: Epoch
@@ -172,6 +231,7 @@ class TaskOutcome(Model):
     ok: bool
     logical_operation_id: Identifier
     duplicate: bool = False
+    retryable_no_effect: bool = False
     code: str | None = None
     state: Literal["information", "slots_offered", "slot_selected", "awaiting_confirmation", "booked", "complete"] | None = None
     state_version: Annotated[int | None, Field(strict=True, ge=0)] = None

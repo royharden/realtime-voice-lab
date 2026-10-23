@@ -23,12 +23,14 @@ from pydantic import TypeAdapter
 from voicelab.accounting.ledger import AttemptLedger, BudgetRefused
 from voicelab.adapters import create_arm
 from voicelab.adapters.live import validate_live_config
-from voicelab.contracts import Audio, ClientStatus, Commit, End, Hash, Hello, Identifier, Interrupt, Ping, Rendered, Resume, ServerMessage, parse_client, serialize_server
+from voicelab.contracts import Audio, ClientStatus, ClockProbe, Commit, End, Hash, Hello, Identifier, Interrupt, MockFaultControl, MockFaultPolicy, MockFaultReceipt, Ping, Rendered, Resume, ServerMessage, parse_client, serialize_server
+from voicelab.core.faults import FaultRefused, MockFaultController
 from voicelab.core.journal import LifecycleJournal
 from voicelab.core.session import Admission, SessionState, SessionViolation
 from voicelab.core.retention import RetentionManifest, TrialRetention
 from voicelab.core.task import TaskAuthority
 from voicelab.core.trace import TraceWriter, store_pcm
+from voicelab.core.snapshots import read_snapshot, save_snapshot
 from voicelab.security import safe_artifact_path, validate_boundary
 
 EVIDENCE_LABEL = "keyless mock — diagnostic synthetic tone; no spoken-task acceptance"
@@ -83,6 +85,7 @@ class Settings:
     retention_manifests: tuple[dict[str, Any], ...] = ()
     run_id: str = "mock-local"
     run_manifest_hash: str | None = None
+    mock_fault_policy: dict[str, Any] | None = None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -92,6 +95,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     TypeAdapter(Identifier).validate_python(settings.run_id)
     if settings.run_manifest_hash is not None:
         TypeAdapter(Hash).validate_python(settings.run_manifest_hash)
+    fault_policy = MockFaultPolicy.model_validate(settings.mock_fault_policy) if settings.mock_fault_policy is not None else None
+    if fault_policy is not None and settings.mode != "mock":
+        raise ValueError("mock_fault_controls_refused_in_live_mode")
     live_configs: dict[str, dict[str, Any]] = {}
     if settings.mode == "live":
         if not settings.live_config or not settings.enabled_arms or any(arm not in {"V", "C"} for arm in settings.enabled_arms):
@@ -164,7 +170,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             authority.close()
         evidence["runtime_verified"] = False
+        for key, kind in (("ledger", "ledger_snapshot"), ("faults", "fault_controls")):
+            metadata = next((row for row in evidence["artifacts"] if row.get("kind") == kind), None)
+            evidence[key] = None
+            evidence[key + "_artifact"] = metadata or {"observation": "unknown", "reason": "terminal_snapshot_unavailable"}
+            if metadata is not None:
+                try:
+                    evidence[key] = read_snapshot(settings.artifact_root, metadata)
+                except (OSError, ValueError, KeyError):
+                    evidence[key + "_artifact"] = {**metadata, "observation": "unknown", "reason": "saved_snapshot_missing_or_hash_invalid"}
+        active = sessions.get(session_id)
+        if active is not None and active.faults is not None:
+            evidence["active_fault_controls"] = active.faults.snapshot()
+            evidence["active_fault_controls"]["adapter_counters"] = active.adapter.diagnostics()
         return evidence
+
+    @app.post("/sessions/{session_id}/faults", response_model=MockFaultReceipt)
+    async def control_fault(session_id: str, request: Request) -> dict[str, object]:
+        authorize(request)
+        if settings.mode != "mock" or fault_policy is None:
+            raise HTTPException(status_code=403, detail="operator_enabled_mock_fault_policy_required")
+        relay = sessions.get(session_id)
+        if relay is None or relay.state.closed:
+            raise HTTPException(status_code=409, detail="fault_target_not_active")
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 512:
+                raise HTTPException(status_code=413, detail="fault_control_body_bound")
+            raw.extend(chunk)
+        try:
+            control = MockFaultControl.model_validate_json(bytes(raw))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid_closed_fault_control") from exc
+        # Body streaming yielded; recheck that the target still admits controls.
+        if relay.state.closed or sessions.get(session_id) is not relay:
+            raise HTTPException(status_code=409, detail="fault_target_not_active")
+        if relay.state.deadline_reason() is not None:
+            raise HTTPException(status_code=409, detail="fault_target_deadline_reached")
+        try:
+            receipt, fresh = relay.faults.arm(control, relay.state.connection_epoch, relay.state.response_epoch)
+        except FaultRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not fresh:
+            return receipt
+        if control.kind == "service_restart":
+            relay.faults.take("service_restart")
+            relay.faults.applied(control.control_id, injected_count=1, actual_process_restart=False,
+                effect="only_target_mock_session_terminated")
+            receipt = relay.faults.response(control.control_id)
+            await relay.shutdown("simulated_service_restart", outcome="service_restart", source="mock_fault_simulation")
+            return receipt
+        if control.kind == "provider_error":
+            selected = relay.faults.take("provider_error")
+            await relay.adapter.inject_provider_error(selected)
+        return relay.faults.response(control.control_id)
 
     @app.get("/sessions/{session_id}/trace")
     async def session_trace(session_id: str, request: Request) -> Response:
@@ -306,6 +365,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             self.adapter_config.update(connection_epoch=0, response_epoch=0)
             budget = Decimal(self.adapter_config["budget_usd"]) if config.mode == "live" else Decimal("0")
             self.run_id = run_id = self.adapter_config["run_id"] if config.mode == "live" else config.run_id
+            self.faults = MockFaultController(fault_policy, {"session_id": state.session_id,
+                "run_id": run_id, "trial_id": state.trial_namespace, "arm": state.arm,
+                "boot_id": boot_id}, self.record_fault,
+                lambda: (self.state.connection_epoch, self.state.response_epoch)) if fault_policy is not None else None
+            if self.faults is not None:
+                self.adapter_config["mock_fault_controller"] = self.faults
             ledger_name = f"attempts-{run_id}.sqlite3"
             self.authority = TaskAuthority(safe_artifact_path(config.artifact_root, "task.sqlite3"))
             try:
@@ -332,9 +397,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             self.current_transport_turn: str | None = None
             self.logical_response_starts: dict[str, int] = {}
             self.trace_integrity_failed = False
+            self.clock_probe_ids: set[str] = set()
+            self.legacy_pings: set[int] = set()
+            self.turn_has_transcript = False
+            self.recorded_effect_operations: set[str] = set()
 
         async def send(self, kind: str, payload: dict[str, Any]) -> None:
             async with self.lock:
+                if kind == "clock_pong":
+                    payload = {**payload, "server_sent_ns": time.monotonic_ns()}
                 message = ServerMessage(type=kind, session_id=self.state.session_id, connection_epoch=self.state.connection_epoch, response_epoch=self.state.response_epoch, sequence=self.sequence, payload=payload)
                 self.sequence += 1
                 await asyncio.wait_for(self.socket.send_text(serialize_server(message)), timeout=2)
@@ -345,6 +416,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:
                 self.trace_integrity_failed = True
                 raise
+
+        def record_fault(self, receipt: dict) -> None:
+            details = receipt.get("details", {})
+            self.record("fault_control", control_id=receipt["control_id"], fault_kind=receipt["kind"],
+                fault_status=receipt["status"], simulation=True, affected_boundary=receipt["affected_boundary"],
+                injected_count=receipt["injected_count"], logical_turn_id=self.active_logical_turn,
+                transport_turn_id=self.current_transport_turn, provider_tool_id=details.get("provider_tool_id"),
+                provider_transport_id=details.get("provider_transport_id"))
+
+        def record_effect(self, operation: str) -> None:
+            if operation not in self.recorded_effect_operations:
+                self.recorded_effect_operations.add(operation)
+                self.record("effect_commit", operation_id=operation,
+                    logical_turn_id=self.active_logical_turn, transport_turn_id=self.current_transport_turn)
 
         async def open(self) -> None:
             self.record("session_started", reason=evidence_label)
@@ -401,6 +486,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if ((kind in {"audio", "task", "transcript"} or event.get("kind") == "response_done") or event.get("turn_id") is not None) and event.get("turn_id") != self.state.active_turn:
                         self.record("stale_discarded", reason="inactive transport turn")
                         continue
+                    if event.get("kind") == "mock_transport_drop":
+                        self.record("provider_event", reason="simulated transport drop at " + event["phase"],
+                            control_id=event["control_id"], simulation=True,
+                            logical_turn_id=self.active_logical_turn, transport_turn_id=self.current_transport_turn)
+                        await self.detach()
+                        with suppress(Exception):
+                            await self.socket.close(code=1012, reason="mock fault transport drop")
+                        return
+                    if event.get("kind") == "mock_provider_error":
+                        await self.fail("queue_overrun" if event.get("error_code") == "queue_overrun" else "provider_error")
+                        return
                     if kind == "audio":
                         raw = base64.b64decode(event["pcm16"], validate=True)
                         if len(raw) % 2 or not 0 < len(raw) <= 9600 or event.get("sample_rate") != 24000:
@@ -419,13 +515,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         outcome = event.get("outcome", {})
                         self.turn_outcome = "off_script" if outcome.get("lexical_miss") else ("success" if outcome.get("ok") is True else "task_failure")
                         if outcome.get("effect_committed") and not outcome.get("duplicate"):
-                            self.record("effect_commit", operation_id=outcome["logical_operation_id"])
+                            self.record_effect(outcome["logical_operation_id"])
                         await self.send("task", outcome)
                     elif kind == "transcript":
+                        self.turn_has_transcript = True
                         source = "mock_debug_text" if self.settings.mode == "mock" else "provider_transcript_unverified"
                         self.record("transcript", logical_turn_id=self.active_logical_turn, transport_turn_id=event.get("turn_id"), reason=source)
                         await self.send("transcript", {**event, "source": source})
                     else:
+                        if event.get("kind") == "mock_tool_attempt":
+                            self.record("provider_event", reason="mock proposal parser and authority attempt",
+                                logical_turn_id=self.active_logical_turn, transport_turn_id=self.current_transport_turn,
+                                provider_tool_id=event["provider_tool_id"], provider_transport_id=event["provider_transport_id"],
+                                operation_id=event["logical_operation_id"])
+                            if event.get("effect_committed") and not event.get("duplicate"):
+                                self.record_effect(event["logical_operation_id"])
                         if event.get("kind") == "controller_span":
                             start, end = event.get("start_ns"), event.get("end_ns")
                             if event.get("clock_domain") != "server_monotonic_ns" or type(start) is not int or type(end) is not int or not 0 <= start <= end:
@@ -434,6 +538,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         self.record("provider_event", reason=str(event.get("kind", "unknown"))[:500])
                         await self.send("event", event)
                         if event.get("kind") == "response_done":
+                            if self.settings.mode == "mock" and not self.turn_has_transcript:
+                                await self.fail("provider_error")
+                                return
                             self.state.done(event.get("response_id"))
                             if self.state.state == "listening":
                                 self.finish_turn(self.turn_outcome, "generation_complete_and_render_ack")
@@ -477,6 +584,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if self.state.deadline_reason() == "response_deadline":
                     raise SessionViolation("response_deadline")
                 self.turn_outcome = "task_failure"
+                self.turn_has_transcript = False
                 self.record("commit_received", logical_turn_id=self.active_logical_turn, transport_turn_id=message.turn_id)
                 await self.send("state", {"state": "awaiting_response"})
                 self.turn_task = asyncio.create_task(self.commit_adapter(message, self.active_logical_turn))
@@ -498,6 +606,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.wait_for(self.adapter.cancel(previous, self.state.response_epoch, cutoff), timeout=2)
                 await self.send("state", {"state": "listening", "fence_epoch": self.state.response_epoch, "task": self.authority.snapshot(self.state.trial_namespace)})
             elif isinstance(message, Rendered):
+                self.state.validate_rendered(message.response_id, message.rendered_through_sample)
+                lost = self.faults.take("lost_ack") if self.faults is not None else None
+                if lost:
+                    self.faults.applied(lost["control_id"], injected_count=0, dropped_rendered_acks=1,
+                        response_id=message.response_id, rendered_through_sample=message.rendered_through_sample)
+                    return
                 self.state.rendered(message.response_id, message.rendered_through_sample)
                 self.retention.acknowledge(message.response_id, message.rendered_through_sample)
                 self.record("rendered_ack", logical_turn_id=self.active_logical_turn, transport_turn_id=self.current_transport_turn, response_id=message.response_id, sample_offset=message.rendered_through_sample, sample_rate=24000)
@@ -532,8 +646,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 self.sender = asyncio.create_task(self.pump())
                 await self.send("state", {"state": "listening"})
             elif isinstance(message, Ping):
+                if message.sequence in self.legacy_pings or len(self.legacy_pings) + len(self.clock_probe_ids) >= 20:
+                    raise SessionViolation("clock_probe_limit_or_duplicate")
+                self.legacy_pings.add(message.sequence)
                 stamp = time.monotonic_ns()
                 await self.send("pong", {"sequence": message.sequence, "browser_ms": message.browser_ms, "server_receive_ns": stamp, "server_send_ns": time.monotonic_ns(), "clock_domain": "server_monotonic_ns", "one_way_delay_known": False})
+            elif isinstance(message, ClockProbe):
+                if message.probe_id in self.clock_probe_ids or len(self.clock_probe_ids) + len(self.legacy_pings) >= 20:
+                    raise SessionViolation("clock_probe_limit_or_duplicate")
+                received = time.monotonic_ns()
+                self.clock_probe_ids.add(message.probe_id)
+                self.record("clock_probe", reason="echo only; browser and server clock domains remain separate")
+                await self.send("clock_pong", {"probe_id": message.probe_id,
+                    "browser_sent_ms": message.browser_sent_ms, "server_received_ns": received,
+                    "server_sent_ns": time.monotonic_ns(), "clock_domain": "server_monotonic_ns",
+                    "browser_clock_domain": "browser_performance_ms", "boot_id": boot_id,
+                    "probe_count": len(self.clock_probe_ids) + len(self.legacy_pings), "probe_limit": 20,
+                    "server_receive_boundary": "validated_clock_probe_handler",
+                    "server_send_boundary": "relay_send_dispatch",
+                    "one_way_delay_known": False})
             elif isinstance(message, End):
                 await self.shutdown("ended_by_user")
             elif isinstance(message, ClientStatus):
@@ -600,6 +731,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 task_outcome = self.authority.snapshot(self.state.trial_namespace)
             if outcome is None:
                 outcome = ("success" if task_outcome.get("state") in {"booked", "complete"} else "abandoned") if reason == "ended_by_user" else failure_outcome(reason)
+            ledger_snapshot = None
+            ledger_artifact: dict[str, object] = {"observation": "unknown", "reason": "ledger_snapshot_unavailable"}
+            try:
+                # One existing atomic summary read; the saved bytes and echoed totals are identical.
+                ledger_snapshot = self.ledger.summary()
+                ledger_artifact = save_snapshot(self.settings.artifact_root, self.state.session_id, "ledger_snapshot", ledger_snapshot)
+                ledger_artifact.update(scope="run_ledger_snapshot", run_id=self.run_id,
+                    captured_for_session_id=self.state.session_id, boot_id=boot_id,
+                    server_timestamp_ns=time.monotonic_ns(), clock_domain="server_monotonic_ns")
+                self.journal.artifact(self.state.session_id, ledger_artifact["artifact_hash"], ledger_artifact)
+            except Exception:
+                ledger_snapshot = None
+                ledger_artifact = {"observation": "unknown", "reason": "ledger_snapshot_write_or_read_failure"}
+            fault_artifact: dict[str, object] | None = None
+            if self.faults is not None:
+                with suppress(Exception):
+                    self.faults.finish(outcome)
+                try:
+                    fault_snapshot = self.faults.snapshot()
+                    fault_snapshot["adapter_counters"] = self.adapter.diagnostics()
+                    fault_artifact = save_snapshot(self.settings.artifact_root, self.state.session_id, "fault_controls", fault_snapshot)
+                    self.journal.artifact(self.state.session_id, fault_artifact["artifact_hash"], fault_artifact)
+                except Exception:
+                    fault_artifact = {"observation": "unknown", "reason": "fault_receipts_snapshot_unavailable"}
             try:
                 retention = self.retention.finalize(self.settings.artifact_root, self.state.session_id)
             except Exception:
@@ -629,7 +784,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 with suppress(Exception):
                     self.authority.close()
             with suppress(Exception):
-                await self.send("ended", {"reason": reason, "outcome": outcome, "outcome_source": source, "task": task_outcome, "trace_hash": trace_hash, "trace": trace_metadata, "lifecycle_persisted": journal_saved, "effect_fence": effect_fence, "ledger": self.ledger.summary(), "retention": retention, "evidence_label": evidence_label, "evidence_reference": f"/sessions/{self.state.session_id}/evidence", "spoken_correctness": "unknown"})
+                await self.send("ended", {"reason": reason, "outcome": outcome, "outcome_source": source, "task": task_outcome, "trace_hash": trace_hash, "trace": trace_metadata, "lifecycle_persisted": journal_saved, "effect_fence": effect_fence, "ledger": ledger_snapshot, "ledger_artifact": ledger_artifact, "faults_artifact": fault_artifact, "retention": retention, "evidence_label": evidence_label, "evidence_reference": f"/sessions/{self.state.session_id}/evidence", "spoken_correctness": "unknown"})
             with suppress(Exception):
                 await self.socket.close(code=1000)
 

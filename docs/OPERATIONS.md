@@ -165,6 +165,63 @@ and an optional `run_manifest_hash` to link a saved run; these are syntax-valida
 operator claims. The default remains `mock-local`; actual observed trial/session
 IDs stay distinct from planned IDs and require the saved mapping in INTERFACES.md.
 
+## Operator-only mock fault source
+
+Faults are disabled by default. A later authorized mock operator may supply
+`Settings.mock_fault_policy` with literal `enabled=true`, a fixed u32 `seed`, a real
+bounded `authorization_reference`, and optional `max_controls` 1..32. No sample
+authorization, provider payload, URL/path, executable code or policy comes from the
+browser. Supplying fault policy in live mode refuses factory activation; the endpoint
+also checks mode/policy and the ordinary exact Host/Origin/nonce boundary.
+
+POST a maximum 512-byte JSON body to `/sessions/{session_id}/faults`:
+
+```json
+{"control_id":"dev-fault-001","kind":"fresh_tool_duplicate"}
+```
+
+The closed kinds and canonical receipt are in contracts.py and
+contracts/fault-controls-v1.json. Same ID/kind while active returns the frozen first
+HTTP receipt without injecting again; changed kind with that ID, capacity excess,
+same pending kind, expired or ended target refuse. An armed receipt is not an applied
+fault. Read current control diagnostics through active evidence, and saved receipts
+through post-End evidence. Late/reordered/duplicate PCM retains sequence and epoch
+identity; missing audio/transcript suppresses parsed output. Queue-overrun requests
+inject 12 bounded 200 ms tone frames; the later observed terminal may differ from the
+requested queue outcome and must not be relabeled as a successful fault test.
+
+`lost_ack` drops the next valid rendered ACK before changing relay playback state.
+Before/after-commit drops apply only at an actually eligible confirmation effect:
+the former records a retryable no-effect attempt, the latter follows SQLite commit.
+They close only the target mock socket and use normal bounded reconnect, journal
+query and repeat identity. Fresh-tool duplicate uses new mock tool/provider-transport
+IDs with the same logical operation; the authority preserves original outcomes and
+one booking. Counts in the authority journal and fault snapshot are evidence inputs,
+not independent task/adjudication verdicts.
+
+`service_restart` simulates only a target-session termination, with
+`outcome_source=mock_fault_simulation` and `actual_process_restart=false`; it never
+terminates/restarts an OS process. `provider_error` passes a generated error through
+the existing mock/native error parser before relay termination. Fault boundaries not
+reached before End become unresolved; new controls after End refuse. Post-End
+evidence remains readable with the same local boundary.
+
+Terminal evidence now includes `ledger` plus `ledger_artifact`, a canonical JSON
+snapshot with raw attempts/events/totals, SHA256 and relative reference. It is the
+existing atomic run-ledger read, saved once for that ending session; it can contain
+other sessions' attempts/reservations. Later GET verifies the saved snapshot instead
+of recomputing a newer bill. `faults`/`faults_artifact` similarly retain receipts and
+owned mock queue/discard/authority-outcome/effect counters. Unavailable or oversized
+snapshots stay null/unknown, never empty zero-cost success. No accounting source changed.
+
+The additional client `clock_probe` variant has `probe_id` and finite nonnegative
+`browser_sent_ms`; `clock_pong` echoes them with `server_received_ns`,
+`server_sent_ns`, explicit clock/boundary/boot labels and no one-way-delay calculation.
+The combined clock-probe/legacy-ping allowance is 20 per session. Duplicate probe
+IDs or exhausted allowance end with a protocol error. The browser may calculate a
+bounded clock diagnostic from saved observations, but server receipt/send are not
+browser receipt, speech end or physical audio output. All these paths remain unrun.
+
 `VOICELAB_ARTIFACT_ROOT` selects local runtime artifacts (default `.agent-work/runtime`
 relative to activation cwd). Startup creates task/attempt SQLite files and bounded
 metadata traces there. Use an operator-controlled directory, outside public exports;

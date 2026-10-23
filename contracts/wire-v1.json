@@ -6,7 +6,7 @@
   "type": "object",
   "required": ["type"],
   "properties": {
-    "type": {"enum": ["hello", "audio", "commit", "interrupt", "rendered", "resume", "end", "ping", "client_status"]},
+    "type": {"enum": ["hello", "audio", "commit", "interrupt", "rendered", "resume", "end", "ping", "client_status", "clock_probe"]},
     "protocol_version": {"const": 1},
     "mode": {"enum": ["mock", "live"]},
     "arm": {"enum": ["V", "C", "K"]},
@@ -22,6 +22,8 @@
     "outcome": {"enum": ["permission_denied", "device_lost", "silence_timeout", "abandoned", "unsupported_audio"]},
     "rendered_through_sample": {"type": "integer", "minimum": 0},
     "browser_ms": {"type": "number", "minimum": 0},
+    "probe_id": {"$ref": "#/$defs/id"},
+    "browser_sent_ms": {"type": "number", "minimum": 0},
     "rendered_ack": {"type": ["object", "null"]}
   },
   "additionalProperties": false,
@@ -33,7 +35,8 @@
     {"if": {"properties": {"type": {"const": "rendered"}}}, "then": {"required": ["response_id", "rendered_through_sample"]}},
     {"if": {"properties": {"type": {"const": "resume"}}}, "then": {"required": ["connection_epoch"]}},
     {"if": {"properties": {"type": {"const": "ping"}}}, "then": {"required": ["sequence", "browser_ms"], "properties": {"sequence": {"maximum": 19}}}},
-    {"if": {"properties": {"type": {"const": "client_status"}}}, "then": {"required": ["outcome"]}}
+    {"if": {"properties": {"type": {"const": "client_status"}}}, "then": {"required": ["outcome"]}},
+    {"if": {"properties": {"type": {"const": "clock_probe"}}}, "then": {"required": ["probe_id", "browser_sent_ms"]}}
   ],
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9_-]+$"},

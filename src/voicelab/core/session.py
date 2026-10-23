@@ -129,12 +129,15 @@ class SessionState:
         self.state = "playing"
         return True
 
-    def rendered(self, response_id: str, sample: int) -> None:
+    def validate_rendered(self, response_id: str, sample: int) -> None:
         self.check_live()
         if self.deadline_reason() == "response_deadline":
             raise SessionViolation("response_deadline")
         if self.state not in {"playing", "awaiting_response"} or response_id != self.active_response or sample < self.rendered_through_sample or sample > self.response_samples:
             raise SessionViolation("invalid_rendered_ack")
+
+    def rendered(self, response_id: str, sample: int) -> None:
+        self.validate_rendered(response_id, sample)
         self.rendered_through_sample = sample
         if self.generation_done and sample == self.response_samples:
             self._listen()
