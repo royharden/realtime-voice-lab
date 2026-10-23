@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from importlib import import_module
 from pathlib import Path
@@ -21,6 +22,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     serve.add_argument("--run-manifest-hash", help="Operator-supplied SHA-256 link; not execution proof")
     serve.add_argument("--artifact-root", type=Path, default=Path(".agent-work/runtime"))
     serve.add_argument("--allowed-origin", help="Exact registered loopback browser origin")
+    serve.add_argument("--mock-fault-policy", type=Path, help="Explicit operator mock-only policy JSON")
     delegates = {
         "run": ("voicelab.evaluation.cli", "run"),
         "eval": ("voicelab.evaluation.cli", "report"),
@@ -54,6 +56,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         import uvicorn
         from voicelab.server.app import Settings, create_app
 
+        fault_policy = None
+        if args.mock_fault_policy is not None:
+            try:
+                if args.mock_fault_policy.stat().st_size > 16_384:
+                    parser.error("Mock fault policy exceeds the configuration bound")
+                fault_policy = json.loads(args.mock_fault_policy.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                parser.error("Mock fault policy must be a readable UTF-8 JSON object")
+            if not isinstance(fault_policy, dict):
+                parser.error("Mock fault policy must be a JSON object")
         settings = Settings(
             nonce=os.environ.get("VOICELAB_NONCE", os.environ.get("VOICELAB_SESSION_NONCE", "")),
             allowed_origin=args.allowed_origin or os.environ.get("VOICELAB_ALLOWED_ORIGIN", ""),
@@ -61,6 +73,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             mode=args.mode,
             run_id=args.run_id,
             run_manifest_hash=args.run_manifest_hash,
+            mock_fault_policy=fault_policy,
         )
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
 
