@@ -37,12 +37,58 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument('--freeze-hash', required=True)
     run.add_argument('--activation-reference', required=True)
     run.add_argument('--out', required=True)
+    review = sub.add_parser('review-packet', help='prepare one bounded unadjudicated task packet from approved synthetic evidence')
+    review.add_argument('--bundle', required=True)
+    review.add_argument('--artifact-root', required=True)
+    review.add_argument('--task-id', required=True)
+    review.add_argument('--freeze-hash')
+    review.add_argument('--out', required=True)
+    append = sub.add_parser('review-append', help='append explicit human choices; CLI does not authenticate independence')
+    append.add_argument('--packet', required=True)
+    append.add_argument('--submission', required=True)
+    append.add_argument('--journal', required=True)
+    export = sub.add_parser('review-export', help='export canonical oracle claims; default CLI keeps correctness unknown')
+    export.add_argument('--packet', required=True)
+    export.add_argument('--journal', required=True)
+    export.add_argument('--artifact-root', required=True)
+    export.add_argument('--expected-head', help='externally retained immutable final decision head; absent means unknown')
+    export.add_argument('--out', required=True)
+    custody = sub.add_parser('custody-import', help='structural import only; no self-issued custodian/release approval')
+    custody.add_argument('--bundle', required=True)
+    custody.add_argument('--artifact-root', required=True)
+    custody.add_argument('--freeze-hash', required=True)
+    custody.add_argument('--release-hash', required=True)
+    custody.add_argument('--out', required=True)
     args = parser.parse_args(argv)
     if args.command == "plan":
         result = create_trial_plan(json.loads(Path(args.request).read_text(encoding="utf-8")))
         # Exclusive creation: changing a published plan requires a new file and cohort.
         with Path(args.out).open("xb") as stream:
             stream.write(canonical_bytes(result))
+    elif args.command == 'review-packet':
+        from .adjudication import prepare_review_packet
+        packet = prepare_review_packet(json.loads(Path(args.bundle).read_text(encoding='utf-8')),
+            args.artifact_root, args.task_id, expected_freeze_hash=args.freeze_hash)
+        with Path(args.out).open('xb') as stream:
+            stream.write(canonical_bytes(packet))
+    elif args.command == 'review-append':
+        from .adjudication import append_decision
+        record = append_decision(args.journal, json.loads(Path(args.packet).read_text(encoding='utf-8')),
+                                 json.loads(Path(args.submission).read_text(encoding='utf-8')))
+        print(json.dumps({'record_hash': record['record_hash'], 'actor_verification': record['actor_verification']}, sort_keys=True))
+    elif args.command == 'review-export':
+        from .adjudication import export_oracle, read_decision_journal
+        packet = json.loads(Path(args.packet).read_text(encoding='utf-8'))
+        records = read_decision_journal(args.journal, packet, expected_head=args.expected_head)
+        rows, _ = export_oracle(packet, records, artifact_root=args.artifact_root, expected_head=args.expected_head)
+        with Path(args.out).open('xb') as stream:
+            stream.write(b''.join(canonical_bytes(row) for row in rows))
+    elif args.command == 'custody-import':
+        from .custody import import_custody
+        receipt, _ = import_custody(json.loads(Path(args.bundle).read_text(encoding='utf-8')),
+            args.artifact_root, expected_freeze_hash=args.freeze_hash, expected_release_hash=args.release_hash)
+        with Path(args.out).open('xb') as stream:
+            stream.write(canonical_bytes(receipt))
     elif args.command == 'run':
         bundle = json.loads(Path(args.gate_bundle).read_text(encoding='utf-8'))
         reader, manifest, frozen_plan, gates = prepare_inputs(bundle, args.artifact_root,

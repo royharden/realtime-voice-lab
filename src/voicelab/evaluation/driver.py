@@ -69,6 +69,8 @@ def convert_driver_events(events: list[dict], plan: dict) -> dict:
                     if old is not None and old != candidate:
                         raise ValueError('attempt crosses observed driver sessions')
                     attempt_mappings[attempt['attempt_id']] = candidate
+            if message.get('type') == 'audio' and turn is not None and payload.get('response_id'):
+                observations[turn]['response_id'] = payload['response_id']
             server_event = payload if message.get('type') == 'event' and 'run_id' in payload else None
             if server_event is not None and turn is not None:
                 try:
@@ -112,7 +114,7 @@ def convert_driver_events(events: list[dict], plan: dict) -> dict:
                     observations[turn][key] = value
             observations[turn]['timing_domain'] = 'browser_performance_ms'
         if turn is not None:
-            for key in ('input_audio_artifact', 'rendered_audio_artifact', 'calibration_artifact'):
+            for key in ('input_audio_artifact', 'rendered_audio_artifact', 'calibration_artifact', 'confirmation_artifact'):
                 if event.get(key):
                     observations[turn][key] = event[key]
             if kind in {'turn_not_started', 'scheduled_turn_unattempted'} and event.get('observation') == 'observed':

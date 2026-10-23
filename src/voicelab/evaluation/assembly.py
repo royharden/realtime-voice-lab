@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from voicelab.contracts import (Attempt, EvidenceRecord, Identifier, Model, RunManifest,
+from voicelab.contracts import (Attempt, Epoch, EvidenceRecord, Hash, Identifier, Model, RunManifest,
                                ScheduledTurn, TerminalOutcome, TurnResult, VoiceEvent)
 from voicelab.reporting import write_report
 from voicelab.reporting.diagnostics import calibration_report
@@ -37,9 +37,24 @@ class TurnObservation(Model):
     rendered_audio_artifact: str | None = None
     input_audio_artifact: str | None = None
     calibration_artifact: str | None = None
+    confirmation_artifact: str | None = None
+    response_id: Identifier | None = None
     retry_count: int = Field(default=0, strict=True, ge=0)
     duplicate_count: int = Field(default=0, strict=True, ge=0)
     stages: list[dict[str, object]] = Field(default_factory=list)
+
+
+class ConfirmationEvidence(Model):
+    task_id: Identifier
+    journal_hash: Hash
+    trace_hash: Hash
+    confirmation_turn_id: Identifier
+    challenge_hash: Hash
+    state_version: int = Field(strict=True, ge=0)
+    response_epoch: Epoch
+    slot_id: Literal['slot-a', 'slot-b']
+    audio_artifact: str = Field(min_length=1, max_length=500)
+    audio_hash: Hash
 
 
 def _index(rows: list[dict], key: str) -> dict[str, dict]:
@@ -194,13 +209,18 @@ def _validate_journal(journal: dict, manifest: dict, correlations: list[dict]) -
 
 def _oracle(row: dict | None, *, manifest: dict, assignment: dict, journal_hash: str,
             input_hash: str | None, output_hash: str | None, trace_hash: str,
+            response_id: str | None, confirmation_hash: str | None, confirmation_audio_hash: str | None,
             verify_oracle: Callable[[dict], bool] | None) -> tuple[bool | None, bool | None, str | None, list[str]]:
     if row is None or verify_oracle is None or not verify_oracle(row):
         return None, None, None, ["independent adjudication not externally verified"]
     bindings = {"run_id": manifest["run_id"], "trial_id": assignment["trial_id"],
                 "logical_turn_id": assignment["logical_turn_id"], "journal_hash": journal_hash,
-                "input_audio_hash": input_hash, "rendered_audio_hash": output_hash, "trace_hash": trace_hash}
-    if any(row.get(key) != value for key, value in bindings.items()) or not input_hash or not output_hash:
+                "input_audio_hash": input_hash, "rendered_audio_hash": output_hash, "trace_hash": trace_hash,
+                'code_hash': manifest['code_hash'], 'build_hash': manifest['build_hash'],
+                'fixture_manifest_hash': manifest['fixture_manifest_hash'], 'response_id': response_id,
+                'confirmation_evidence_hash': confirmation_hash, 'confirmation_audio_hash': confirmation_audio_hash}
+    if (any(row.get(key) != value for key, value in bindings.items()) or not input_hash or not output_hash
+            or not response_id or not confirmation_hash or not confirmation_audio_hash):
         return None, None, None, ["adjudication evidence binding incomplete/mismatched"]
     if row.get("method") != "independent_manual_listening_and_authority_journal":
         return None, None, None, ["provider transcript or nonindependent oracle is not acceptable"]
@@ -212,7 +232,10 @@ def _oracle(row: dict | None, *, manifest: dict, assignment: dict, journal_hash:
     terminal = row.get("task_terminal")
     if terminal == "success" and (task is not True or spoken is not True):
         terminal = None
-    return task, spoken, terminal, []
+    issues = [str(reason) for reason in row.get('unknown_reasons', [])]
+    if task is None or spoken is None:
+        issues.append('manual task/spoken interpretation remains unknown')
+    return task, spoken, terminal, issues
 
 
 def prepare_inputs(bundle: dict, artifact_root: str | Path, *, expected_freeze_hash: str | None = None,
@@ -287,7 +310,7 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
     _validate_journal(journal, manifest, conversion['correlations'] + conversion['task_admissions'])
     if set(observations) - set(assignments) or set(adjudications) - set(assignments):
         raise ValueError("observation/adjudication outside frozen schedule")
-    rows, evidence, admission_issues, transport_attempts = [], [], [], {}
+    rows, evidence, admission_issues, transport_attempts, review_bindings = [], [], [], {}, []
     for turn_id in plan["scheduled_turns"]:
         assignment = assignments[turn_id]
         supplied = observations.get(turn_id)
@@ -338,9 +361,58 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
         reasons += local_integrity
         input_hash = _audio(reader, observation.input_audio_artifact if observation else None, reasons, "input")
         output_hash = _audio(reader, observation.rendered_audio_artifact if observation else None, reasons, "rendered")
+        response_id = next((event['response_id'] for event in reversed(children)
+                            if event.get('response_id') and event['kind'] in {'audio_sent', 'rendered_ack'}), None)
+        if response_id is None and observation:
+            response_id = observation.response_id
+        confirmation_hash, confirmation_audio_hash, confirmation_audio_name = None, None, None
+        if observation and observation.confirmation_artifact:
+            try:
+                proof = ConfirmationEvidence.model_validate(reader.json(observation.confirmation_artifact,
+                    'confirmation_evidence')).model_dump(mode='json')
+                if (proof.get('task_id') != assignment['task_id'] or proof.get('journal_hash') != reader.verified['journal']
+                        or proof.get('trace_hash') != reader.verified['trace']
+                        or not proof.get('confirmation_turn_id') or not proof.get('challenge_hash')
+                        or type(proof.get('state_version')) is not int or proof['state_version'] < 0
+                        or type(proof.get('response_epoch')) is not int or proof['response_epoch'] < 0
+                        or proof.get('slot_id') not in {'slot-a', 'slot-b'}):
+                    raise ValueError('confirmation evidence scope incomplete')
+                confirmation_audio_name = proof['audio_artifact']
+                confirmation_audio_hash = reader.audio(confirmation_audio_name)
+                if confirmation_audio_hash != proof.get('audio_hash'):
+                    raise ValueError('confirmation audio hash mismatch')
+                confirmation_hash = reader.verified[observation.confirmation_artifact]
+            except (OSError, KeyError, ValueError):
+                confirmation_hash, confirmation_audio_hash, confirmation_audio_name = None, None, None
+                reasons.append('genuine confirmation evidence missing/unbound; human review required')
+        bound = {'run_id': manifest['run_id'], 'task_id': assignment['task_id'], 'trial_id': assignment['trial_id'],
+                 'logical_turn_id': turn_id, 'response_id': response_id,
+                 'code_hash': manifest['code_hash'], 'build_hash': manifest['build_hash'],
+                 'fixture_manifest_hash': manifest['fixture_manifest_hash'], 'trial_plan_hash': manifest['trial_plan_hash'],
+                 'input_audio_hash': input_hash, 'rendered_audio_hash': output_hash,
+                 'journal_hash': reader.verified['journal'], 'trace_hash': reader.verified['trace'],
+                 'ledger_hash': reader.verified['ledger'], 'confirmation_evidence_hash': confirmation_hash,
+                 'confirmation_audio_hash': confirmation_audio_hash,
+                 'observed_trial_id': assignment.get('observed_trial_id'),
+                 'observed_session_id': assignment.get('observed_session_id'),
+                 'observed_boot_id': assignment.get('observed_boot_id')}
+        review_gaps = list(local_integrity)
+        for field in ('response_id', 'input_audio_hash', 'rendered_audio_hash', 'confirmation_evidence_hash', 'confirmation_audio_hash'):
+            if not bound[field]:
+                review_gaps.append('missing ' + field)
+        names = {'input_audio': observation.input_audio_artifact if observation and input_hash else None,
+                 'rendered_audio': observation.rendered_audio_artifact if observation and output_hash else None,
+                 'confirmation_audio': confirmation_audio_name,
+                 'confirmation': observation.confirmation_artifact if observation and confirmation_hash else None,
+                 'journal': 'journal', 'trace': 'trace'}
+        review_bindings.append({'item_id': turn_id, 'bindings': bound,
+            'artifacts': {key: dict(reader.references[name]) if name else None for key, name in names.items()},
+            'evidence_gaps': sorted(set(review_gaps))})
         task_ok, spoken_ok, task_terminal, oracle_issues = _oracle(adjudications.get(turn_id),
             manifest=manifest, assignment=assignment, journal_hash=reader.verified["journal"],
-            input_hash=input_hash, output_hash=output_hash, trace_hash=reader.verified["trace"], verify_oracle=verify_oracle)
+            input_hash=input_hash, output_hash=output_hash, trace_hash=reader.verified["trace"],
+            response_id=response_id, confirmation_hash=confirmation_hash, confirmation_audio_hash=confirmation_audio_hash,
+            verify_oracle=verify_oracle)
         reasons += oracle_issues
         if local_integrity:
             task_ok, spoken_ok, task_terminal = None, None, None
@@ -396,6 +468,7 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
     manifest["turn_assignments"] = [assignments[turn] for turn in plan["scheduled_turns"]]
     return {"manifest": manifest, "rows": rows, "attempts": attempts, "ledger": ledger,
             "evidence": evidence, "gates": gates, "trace_integrity_issues": sorted(set(integrity + admission_issues)),
+            'review_bindings': review_bindings,
             "driver_correlations": {**{key: conversion[key] for key in ('correlations', 'attempt_correlations', 'task_admissions', 'issues')},
                                     'transport_attempts': transport_attempts},
             "source_hashes": dict(sorted(reader.verified.items())), "product_acceptance": False}

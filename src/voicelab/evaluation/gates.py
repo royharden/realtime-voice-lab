@@ -9,6 +9,35 @@ from .artifacts import ArtifactReader, digest
 ReleaseVerifier = Callable[[dict], bool]
 
 
+def freeze_pins(manifest: dict) -> dict:
+    pins = {key: manifest[key] for key in ('code_hash', 'build_hash', 'config_hash', 'schema_hash',
+            'fixture_manifest_hash', 'trial_plan_hash', 'fixture_seal')}
+    pins.update(thresholds_hash=digest(manifest['thresholds']), endpoint_hash=digest(manifest['endpoint']),
+                onset_hash=digest(manifest['onset']))
+    return pins
+
+
+def freeze_matches(manifest: dict, freeze: dict | None, expected_hash: str | None) -> bool:
+    return bool(freeze is not None and expected_hash and digest(freeze) == expected_hash
+                and freeze.get('pins') == freeze_pins(manifest) and freeze.get('frozen_before_exposure') is True)
+
+
+def release_matches(manifest: dict, release: dict, freeze_hash: str | None) -> bool:
+    return (bool(manifest['fixture_seal']) and release.get('run_id') == manifest['run_id'] and release.get('freeze_hash') == freeze_hash
+            and release.get('fixture_manifest_hash') == manifest['fixture_manifest_hash']
+            and release.get('seal') == manifest['fixture_seal']
+            and release.get('candidate_hash') == manifest['code_hash']
+            and release.get('single_use_authorized') is True and bool(release.get('reference')))
+
+
+def audit_fixture_split(fixtures: dict) -> dict:
+    # One dimension-audit implementation, shared with the driver/audit-split CLI.
+    from voicelab.harness.cli import split_audit
+    rows = fixtures.get('fixtures', [])
+    return split_audit({'development': [r for r in rows if r.get('split') == 'dev'],
+                        'heldout': [r for r in rows if r.get('split') == 'heldout']})
+
+
 def validate_gates(manifest: dict, plan: dict, fixtures: dict, freeze: dict | None,
                    reader: ArtifactReader, *, expected_freeze_hash: str | None = None,
                    release: dict | None = None, verify_release: ReleaseVerifier | None = None) -> dict:
@@ -41,34 +70,23 @@ def validate_gates(manifest: dict, plan: dict, fixtures: dict, freeze: dict | No
         development = [row for row in fixture_rows if row.get("split") == "dev"]
         if len({r["wording_family"] for r in development}) < 12 or len({r["speaker"] for r in development}) < 4:
             problems.append("development corpus below 12-family/four-speaker coverage; dev progress only")
-    freeze_valid = False
-    if freeze is not None and expected_freeze_hash and digest(freeze) == expected_freeze_hash:
-        pins = {key: manifest[key] for key in ("code_hash", "build_hash", "config_hash", "schema_hash",
-                "fixture_manifest_hash", "trial_plan_hash", "fixture_seal")}
-        pins["thresholds_hash"] = digest(manifest["thresholds"])
-        pins["endpoint_hash"] = digest(manifest["endpoint"])
-        pins["onset_hash"] = digest(manifest["onset"])
-        freeze_valid = freeze.get("pins") == pins and freeze.get("frozen_before_exposure") is True
+    freeze_valid = freeze_matches(manifest, freeze, expected_freeze_hash)
     if not freeze_valid:
         problems.append("externally pinned pre-exposure build/detector/scorer/plan/fixture freeze absent or mismatched")
     independent_release = False
     if manifest["split"] == "heldout":
-        if not release or verify_release is None or not verify_release(release):
+        if not release or verify_release is None:
             raise ValueError("heldout is closed: externally verified independent custody release required")
-        if (not freeze_valid or release.get("freeze_hash") != expected_freeze_hash
-                or release.get("fixture_manifest_hash") != manifest["fixture_manifest_hash"]
-                or release.get("seal") != manifest["fixture_seal"]
-                or release.get("candidate_hash") != manifest["code_hash"]
-                or release.get("single_use_authorized") is not True
-                or not release.get("reference")):
+        if not freeze_valid or not release_matches(manifest, release, expected_freeze_hash):
             raise ValueError("heldout release does not bind this frozen, once-authorized candidate")
-        for dimension in ("wording_family", "speaker", "interruption_schedule"):
-            development = {row[dimension] for row in fixture_rows if row.get("split") == "dev"}
-            heldout = {row[dimension] for row in selected}
-            if not development or development & heldout:
-                raise ValueError("heldout dimension overlap or missing dev comparison: " + dimension)
+        split = audit_fixture_split(fixtures)
+        if not split['dimensions_complete'] or split['disjoint'] is not True:
+            raise ValueError('heldout dimension overlap/missing comparison; canonical split audit refused')
         if len({r["wording_family"] for r in selected}) < 8 or len({r["speaker"] for r in selected}) < 2:
             raise ValueError("heldout family/speaker coverage incomplete")
+        # Authenticate/redeem only after structural binding/split checks, before audio exposure.
+        if not verify_release(release):
+            raise ValueError('independent custody release authentication/redemption refused')
         independent_release = True
     # Never expose heldout audio before verifying its independent release/freeze.
     for row in selected:

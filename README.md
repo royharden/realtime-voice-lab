@@ -11,10 +11,12 @@ These commands describe the source interfaces; they were not executed during con
 Set `VOICELAB_NONCE` to an operator-chosen per-launch 16–128 character value and `VOICELAB_ALLOWED_ORIGIN` to the exact frontend origin, for example `http://127.0.0.1:<claimed-frontend-port>`. Optional `VOICELAB_ARTIFACT_ROOT` controls the local owned runtime artifact directory. Do not put provider keys into the browser or repository.
 
 ```text
-uv run voicelab serve --mode mock --port <claimed-relay-port> --port-claim <existing-claim-receipt>
+uv run voicelab serve --mode mock --port <claimed-relay-port> --port-claim <existing-claim-receipt> --run-id <frozen-run-id> --run-manifest-hash <manifest-file-sha256> --artifact-root <owned-runtime-root> --allowed-origin http://127.0.0.1:<claimed-frontend-port>
 ```
 
 In `web/`, set `VOICELAB_WEB_PORT` to the checked frontend port and use `npm run dev` after authorized dependency setup. Enter `ws://127.0.0.1:<claimed-relay-port>/ws` and the launch nonce in the UI. Select an arm, Start, and use the labeled typed stimulus: `hours`, `list slots`, `select slot 1`, `confirm`, `status`. Unknown wording asks clarification. Interrupt, Simulate disconnect, explicit retry, End, task journal and trace inspection are implemented in source. Microphone capture does not transcribe audio in mock mode. See [browser notes](web/README.md).
+
+The source serve flags now pass run identity/manifest hash, owned artifact root and exact origin into server settings; `VOICELAB_NONCE` remains the canonical per-launch nonce. Optional `--mock-fault-policy <operator-approved-policy.json>` loads a bounded mock-only JSON object into `Settings.mock_fault_policy`; absent policy stays disabled. These are source interfaces, not evidence that a listener, policy or experiment has run.
 
 Expected source behavior is a guarded task update and diagnostic tone for each admitted typed request, with no provider egress. This paragraph is an implementation description, not actual example execution output.
 
