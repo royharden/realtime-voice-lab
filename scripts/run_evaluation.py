@@ -1,4 +1,4 @@
-"""Prospective plan / saved-artifact assembly. No voice experiment is launched here."""
+"""Plan/report/assembly, or later explicitly authorized mock/dev driver composition."""
 from voicelab.evaluation.cli import main
 
 

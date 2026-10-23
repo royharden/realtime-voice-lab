@@ -31,13 +31,19 @@ Required names/kinds:
 | `fixtures` | `fixtures` | Fixture/license/provenance manifest |
 | `trace` | `trace` | JSONL canonical VoiceEvent records |
 | `ledger` | `ledger` | AttemptLedger summary/export including attempts/events |
-| `observations` | `observations` | JSONL TurnObservation sidecars, one per observed logical turn |
+| `observations` or `driver` | `observations` or `driver_observations` | Canonical TurnObservation sidecars, or raw D7 `driver.jsonl` converted here |
 | `journal` | `journal` | Authority export with exact `run_id`; adjudicator binds its whole-file hash |
 | `adjudication` (optional) | `adjudication` | External independent listening/journal rows |
 | `freeze` (optional in dev) | `freeze` | Pre-exposure code/detector/scorer/plan/fixture pins |
 | `release` (heldout only) | `release` | Externally verified independent custody release |
 
 Additional named `audio` references bind stimulus/rendered WAVs and `calibration` references bind saved repeat lists. No raw audio is embedded in trace/result JSONL. Only explicitly referenced evidence is read; no directory discovery or heldout search occurs.
+
+When `driver` is supplied, D5 converts raw events rather than expecting D7 to produce metrics. Ordered task/action/wire observations remain separate from server facts. In particular `turn_start_attempted`, `turn_driver_ended`, DOM state and session admission do not establish a started or successful logical turn. Malformed/missing hooks and sequence/clock ambiguity stay unknown. The converter refuses raw nonce/headers/authorization/PCM/transcript/text fields; producer telemetry must already be redacted. Original raw files are never rewritten.
+
+Observed relay run IDs (including `mock-local`), server namespaces/session/boot IDs and wire turn IDs remain raw. Saved Ready envelopes and wire commits bind them to prespecified task/turn slots. The converter retains these aliases in `driver-correlations.json`, including actual transport and logical parents; the canonical result/attempt join uses the explicitly declared scheduled slot, never an overwritten source trace. ScheduledTurn's optional `observed_trial_id`, `observed_session_id`, `observed_boot_id` and `identity_evidence_reference` retain this separate verified mapping. Ambiguous or conflicting mappings fail/withhold instead of matching by a reused wire turn number alone. Session admission comes from actual Ready envelopes and is counted separately from logical-turn starts.
+
+Recovery can have several transport terminals under one logical parent. Ordered start/terminal records survive in the correlation sidecar; earlier failed/interrupted attempts are not discarded. The final transport outcome does not reset the original logical deadline or erase prior cost. Browser `speech_end_ms` retains the earliest saved anchor for that logical parent; later retry timing is never rebased to a new zero. No browser anchor can be synthesized from driver/server nanoseconds. Observed controller duration uses explicit D4 `span_start_ns`/`span_end_ns`/`span_clock_domain` and boot identity; trace receipt timestamps cannot stand in for controller execution.
 
 `TurnObservation` is defined in `evaluation/assembly.py`:
 
@@ -76,6 +82,20 @@ python scripts/run_evaluation.py plan --request plan-request.json --out prospect
 python scripts/run_evaluation.py assemble --bundle bundle.json --artifact-root <owned-evidence-root> --freeze-hash <externally-pinned-canonical-freeze-hash> --out <owned-new-output>
 ```
 
-Root CLI integration can call `voicelab.evaluation.cli:main(argv)`; the subcommands are `plan` and `assemble`. Executable audio/browser driving remains the separate D7 driver and requires later runtime authorization. Nothing here starts a listener or calls a provider. Live evidence additionally needs actual authorized provider/capability/price/budget/fixture prerequisites; parsing saved evidence cannot confer that authorization.
+Root CLI integration calls `voicelab.evaluation.cli:main(argv)` with `plan`, `assemble`, `run` or `report`. Executable audio/browser driving remains D7's driver and requires later runtime authorization through the `run` composition below. No entrypoint starts a listener or calls a provider. Live evidence additionally needs actual authorized provider/capability/price/budget/fixture prerequisites; parsing saved evidence cannot confer that authorization.
+
+The root CLI's `run` and `eval` routes are now implemented: evaluation `run` validates the frozen mock/dev plan and gates, calls the producer's `activation.bind_task_fixture(spec,task,planned=True)` for every task, compares its real audio digest to the frozen fixture manifest, checks candidate/config identity, and delegates to `harness.cli.main(['journey',...])`. A global fixture cannot substitute for the selected fixture IDs. Missing bindings, wrong family/speaker/hash or unimplemented producer refuse before browser launch. D7 revalidates fixture inputs at execution and emits actual binding evidence; no per-cell correctness is inferred from a tone label.
+
+Prospective root composition (not executed):
+
+```text
+voicelab run --manifest driver-activation.json --trial-plan prospective-plan.json --gate-bundle preflight-bundle.json --artifact-root <owned-root> --freeze-hash <external-pin> --activation-reference <later-runtime-grant> --out <new-driver-output>
+voicelab eval --bundle bundle.json --artifact-root <owned-root> --out <new-assembled-output>
+voicelab eval --manifest assembled-manifest.json --rows assembled-turns.jsonl --ledger assembled-ledger.json --evidence assembled-evidence.jsonl --source-hashes source-hashes.json --driver-correlations driver-correlations.json --out <new-report-output>
+```
+
+`report` also accepts the original `--manifest/--rows/--ledger` canonical input form; `scripts/eval.py` is a thin alias to it. Direct CLI report inputs are dev-only; independent heldout requires the trusted programmatic assembly route. `plan` and `assemble` remain supported aliases/interfaces. `run` can start the already-installed authorized D7 driver during later activation; importing the module does not start anything. It never starts relay/frontend listeners or dispatches live providers. Driver activation does not itself supply an oracle or run the metrics generator.
 
 `write_evaluation` writes deterministic assembled manifest/turn/attempt/evidence/ledger/gate/source-hash files, then calls the canonical `write_report` once. No alternate metrics/report generator is introduced. Output uses fixed manifest metadata, sorted canonical serialization and exact input digests. No outputs have been generated during construction. Later verification must exercise malformed/missing/reordered records, independent custody/oracles, balanced-driver compliance, trace/ledger joins, report byte reproduction and full dev/offline/live acceptance gates. All remain unverified.
+
+The canonical reporter also emits `failures.json`, `numeric-fragments.json`, `README-results.md` and `LIMITATIONS-results.md` from the same report object, with exact input hashes. It does not overwrite checked-in README/limitations. Evidence records are checked against canonical result hashes, and their source digests must occur in supplied original source references. Full denominator withholding from the F2 repair remains active. Receipt/render raw, calibrated and correctness-qualified conditional distributions are distinct; all-started clean receipt/render nonattainments retain exact nearest-rank censoring. Stage spans require finite ordered anchors, identical clock domain and scope, and real sample rates for sample clocks. Unknown provider clocks, cross-boot arithmetic, absent native internals and translation identity get no fabricated duration. Family-clustered intervals are percentile bootstrap intervals (1,000 fixed-seed replicates), conditional on both qualified responses attaining; missing/unmatched pairs stay explicit. Costs preserve every component attempt/price version and reserved unknown liability; rates show input/output/session denominators separately and undefined zeros. No winner, measured result or independent acceptance is fabricated.

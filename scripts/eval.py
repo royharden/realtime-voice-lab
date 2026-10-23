@@ -2,17 +2,13 @@
 
 Requires installed local package. Consumes approved synthetic artifacts, never calls providers.
 """
-import argparse
+import sys
 
-from voicelab.reporting import write_report
+from voicelab.evaluation.cli import main as evaluation_main
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('manifest', 'rows', 'ledger', 'out'):
-        parser.add_argument('--' + name, required=True)
-    args = parser.parse_args()
-    write_report(args.manifest, args.rows, args.ledger, args.out)
+    return evaluation_main(['report', *sys.argv[1:]])
 
 
 if __name__ == '__main__':

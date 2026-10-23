@@ -20,6 +20,7 @@ from voicelab.reporting.diagnostics import calibration_report
 from .artifacts import ArtifactReader, canonical_bytes, digest
 from .gates import ReleaseVerifier, validate_gates
 from .planning import validate_trial_plan
+from .driver import convert_driver_events
 
 
 class TurnObservation(Model):
@@ -51,22 +52,41 @@ def _index(rows: list[dict], key: str) -> dict[str, dict]:
     return result
 
 
-def _trace_rows(raw: list[dict], manifest: dict, assignment: dict) -> tuple[list[dict], list[str]]:
+def _trace_rows(raw: list[dict], manifest: dict, assignment: dict, correlations: list[dict], session_records: list[dict]) -> tuple[list[dict], list[str]]:
     output, issues, sequences, times = [], [], {}, {}
+    mapping = {(r['observed_run_id'], r['observed_trial_id'], r['session_id'],
+                r.get('observed_transport_turn_id') or r.get('observed_logical_turn_id')): r['logical_turn_id']
+               for r in correlations}
+    sessions = {(r['observed_run_id'], r['observed_trial_id'], r['session_id']) for r in correlations}
+    sessions.update((r['observed_run_id'], r['observed_trial_id'], r['session_id']) for r in session_records)
     for index, row in enumerate(raw):
         try:
             event = VoiceEvent.model_validate(row).model_dump(mode="json")
         except ValueError:
             issues.append(f"trace record {index}: malformed canonical event")
             continue
-        if event["run_id"] != manifest["run_id"]:
+        observed_session = (event['run_id'], event['trial_id'], event['session_id'])
+        turn = mapping.get(observed_session + (event.get('transport_turn_id') or event.get('logical_turn_id'),))
+        original_parent = mapping.get(observed_session + (event.get('logical_turn_id'),))
+        if original_parent is not None:
+            if turn is not None and turn != original_parent:
+                issues.append('recovery transport mapping conflicts with original logical parent')
+            turn = original_parent
+        correlated = turn is not None
+        if not correlated:
+            turn = event['logical_turn_id']
+        if event["run_id"] != manifest["run_id"] and observed_session not in sessions:
             raise ValueError("trace contains a different run")
-        turn = event["logical_turn_id"]
         if turn is not None:
             if turn not in assignment:
                 raise ValueError("trace turn outside scheduled denominator")
-            if (event["trial_id"], event["arm"]) != (assignment[turn]["trial_id"], assignment[turn]["arm"]):
+            if event['arm'] != assignment[turn]['arm'] or (not correlated and event['trial_id'] != assignment[turn]['trial_id']):
                 raise ValueError("trace trial/arm differs from prespecified assignment")
+            expected_boot = assignment[turn].get('observed_boot_id')
+            if expected_boot is not None and event.get('boot_id') != expected_boot:
+                issues.append('trace boot differs from observed ready mapping')
+        # Internal join key only. Original canonical event IDs remain untouched.
+        event['_scheduled_logical_turn_id'] = turn
         key = (event["session_id"], event.get("boot_id"), event["connection_epoch"], event["clock_domain"])
         if event["sequence"] <= sequences.get(key, -1):
             issues.append(f"trace record {index}: duplicate/reordered sequence")
@@ -80,12 +100,19 @@ def _trace_rows(raw: list[dict], manifest: dict, assignment: dict) -> tuple[list
     return output, issues
 
 
-def _attempts(raw: dict, assignments: dict) -> tuple[list[dict], dict]:
+def _attempts(raw: dict, assignments: dict, correlations: list[dict]) -> tuple[list[dict], dict]:
     attempts, known, exposure, unknown = [], Decimal(0), Decimal(0), 0
     source = raw.get("attempts", [])
     _index(source, "attempt_id")
     events = raw.get("events", [])
-    for row in source:
+    by_correlation = _index(correlations, 'attempt_id')
+    for original in source:
+        row = dict(original)
+        correlation = by_correlation.get(row['attempt_id'])
+        if correlation:
+            if row['logical_turn_id'] != correlation['observed_logical_turn_id']:
+                raise ValueError('ledger source ID conflicts with observed driver correlation')
+            row['logical_turn_id'] = correlation['logical_turn_id']
         if row["logical_turn_id"] not in assignments or row["arm"] != assignments[row["logical_turn_id"]]["arm"]:
             raise ValueError("ledger attempt outside run/arm assignment")
         usage = [event for event in events if event.get("attempt_id") == row["attempt_id"] and event.get("kind") == "settled"]
@@ -99,9 +126,11 @@ def _attempts(raw: dict, assignments: dict) -> tuple[list[dict], dict]:
                          usage_source=row.get("usage_source", payload.get("source")),
                          terminal_reason=row.get("terminal_reason", row.get("reason")))
         checked = Attempt.model_validate(canonical).model_dump(mode="json")
+        if not checked['basis'] or not checked['price_version']:
+            raise ValueError('attempt price/bound provenance missing')
         if checked["state"] == "settled":
-            if amount is None:
-                raise ValueError("settled attempt lacks amount")
+            if amount is None or not checked['usage_source']:
+                raise ValueError("settled attempt lacks amount/authoritative usage source")
             known += Decimal(amount)
         else:
             exposure += Decimal(checked["reservation"])
@@ -134,6 +163,35 @@ def _audio(reader: ArtifactReader, name: str | None, reasons: list[str], label: 
         return None
 
 
+def _trace_stages(children: list[dict]) -> list[dict]:
+    spans = []
+    for event in children:
+        if event['kind'] != 'controller_end':
+            continue
+        explicit = (event.get('boot_id') is not None and event.get('span_start_ns') is not None
+                    and event.get('span_end_ns') is not None and event.get('span_clock_domain') == 'server_monotonic_ns')
+        spans.append({'name': 'controller', 'clock_domain': event.get('span_clock_domain', 'unknown'),
+                      'clock_scope': str((event['session_id'], event.get('boot_id'), event['connection_epoch'])),
+                      'start': event['span_start_ns'] if explicit else None,
+                      'end': event['span_end_ns'] if explicit else None,
+                      'observation': 'observed' if explicit else 'unknown',
+                      'reason': None if explicit else 'missing explicit controller span; receipt stamps not substituted'})
+    return spans
+
+
+def _validate_journal(journal: dict, manifest: dict, correlations: list[dict]) -> None:
+    if journal.get('run_id') == manifest['run_id']:
+        return
+    exports = journal.get('sessions', [journal] if 'session' in journal else [])
+    allowed = {(r['observed_run_id'], r['observed_trial_id'], r['session_id']) for r in correlations}
+    if not exports:
+        raise ValueError('authority journal run/observed session binding missing')
+    for export in exports:
+        session = export['session']
+        if (session['run_id'], session['trial_id'], session['session_id']) not in allowed:
+            raise ValueError('authority journal outside observed driver session mapping')
+
+
 def _oracle(row: dict | None, *, manifest: dict, assignment: dict, journal_hash: str,
             input_hash: str | None, output_hash: str | None, trace_hash: str,
             verify_oracle: Callable[[dict], bool] | None) -> tuple[bool | None, bool | None, str | None, list[str]]:
@@ -157,11 +215,9 @@ def _oracle(row: dict | None, *, manifest: dict, assignment: dict, journal_hash:
     return task, spoken, terminal, []
 
 
-def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
-                        expected_freeze_hash: str | None = None,
-                        verify_release: ReleaseVerifier | None = None,
-                        verify_oracle: Callable[[dict], bool] | None = None) -> dict:
-    """No I/O effects except bounded reads. Trust callbacks come from operator code, never artifacts."""
+def prepare_inputs(bundle: dict, artifact_root: str | Path, *, expected_freeze_hash: str | None = None,
+                   verify_release: ReleaseVerifier | None = None) -> tuple:
+    """Shared prospective-run and saved-evidence gates; no client/provider execution."""
     reader = ArtifactReader(artifact_root, bundle["artifacts"])
     manifest = RunManifest.model_validate(reader.json("manifest", "manifest")).model_dump(mode="json")
     plan = reader.json("plan", "plan")
@@ -178,6 +234,16 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
     release = reader.json("release", "release") if "release" in bundle["artifacts"] else None
     gates = validate_gates(manifest, plan, fixture_manifest, freeze, reader,
                            expected_freeze_hash=expected_freeze_hash, release=release, verify_release=verify_release)
+    return reader, manifest, plan, gates
+
+
+def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
+                        expected_freeze_hash: str | None = None,
+                        verify_release: ReleaseVerifier | None = None,
+                        verify_oracle: Callable[[dict], bool] | None = None) -> dict:
+    """No I/O effects except bounded reads. Trust callbacks come from operator code, never artifacts."""
+    reader, manifest, plan, gates = prepare_inputs(bundle, artifact_root,
+        expected_freeze_hash=expected_freeze_hash, verify_release=verify_release)
     assignments = {row["logical_turn_id"]: ScheduledTurn.model_validate(row).model_dump(mode="json")
                    for row in plan["turn_assignments"]}
     manifest_assignments = _index(manifest["turn_assignments"], "logical_turn_id")
@@ -190,26 +256,45 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
         if supplied_assignment["admission_evidence_reference"]:
             for key in ("admission", "admission_evidence_reference"):
                 assignments[turn][key] = supplied_assignment[key]
+    conversion = {'observations': [], 'correlations': [], 'attempt_correlations': [], 'task_admissions': [], 'issues': []}
+    if 'driver' in bundle['artifacts']:
+        conversion = convert_driver_events(reader.jsonl('driver', 'driver_observations'), plan)
+        observation_name = 'driver'
+        observations = _index(conversion['observations'], 'logical_turn_id')
+    else:
+        observation_name = 'observations'
+        observations = _index(reader.jsonl('observations', 'observations'), 'logical_turn_id')
+    for turn, assignment in assignments.items():
+        bindings = [row for row in conversion['correlations'] if row['logical_turn_id'] == turn]
+        if not bindings:
+            bindings = [row for row in conversion['task_admissions'] if row['task_id'] == assignment['task_id']]
+        identities = {(row.get('observed_trial_id'), row.get('session_id'), row.get('observed_boot_id')) for row in bindings}
+        if len(identities) == 1:
+            observed_trial, observed_session, observed_boot = next(iter(identities))
+            for field, value in (('observed_trial_id', observed_trial), ('observed_session_id', observed_session), ('observed_boot_id', observed_boot)):
+                if assignment.get(field) is not None and assignment[field] != value:
+                    raise ValueError('saved observed identity conflicts with hashed driver mapping')
+                assignment[field] = value
+            assignment['identity_evidence_reference'] = 'sha256:' + reader.verified[observation_name]
     raw_trace = reader.jsonl("trace", "trace")
-    trace, integrity = _trace_rows(raw_trace, manifest, assignments)
+    trace, integrity = _trace_rows(raw_trace, manifest, assignments, conversion['correlations'], conversion['task_admissions'])
+    integrity += conversion['issues']
     raw_ledger = reader.json("ledger", "ledger")
-    attempts, ledger = _attempts(raw_ledger, assignments)
-    observations = _index(reader.jsonl("observations", "observations"), "logical_turn_id")
+    attempts, ledger = _attempts(raw_ledger, assignments, conversion['attempt_correlations'])
     adjudications = _index(reader.jsonl("adjudication", "adjudication"), "logical_turn_id") if "adjudication" in bundle["artifacts"] else {}
     # Journal is a hashed authority export, not a provider-reported task outcome.
     journal = reader.json("journal", "journal")
-    if journal.get("run_id") != manifest["run_id"]:
-        raise ValueError("authority journal belongs to a different run")
+    _validate_journal(journal, manifest, conversion['correlations'] + conversion['task_admissions'])
     if set(observations) - set(assignments) or set(adjudications) - set(assignments):
         raise ValueError("observation/adjudication outside frozen schedule")
-    rows, evidence, admission_issues = [], [], []
+    rows, evidence, admission_issues, transport_attempts = [], [], [], {}
     for turn_id in plan["scheduled_turns"]:
         assignment = assignments[turn_id]
         supplied = observations.get(turn_id)
         observation = TurnObservation.model_validate(supplied) if supplied else None
         if observation and (observation.run_id, observation.trial_id) != (manifest["run_id"], assignment["trial_id"]):
             raise ValueError("observation run/trial differs from scheduled assignment")
-        children = [event for event in trace if event["logical_turn_id"] == turn_id]
+        children = [event for event in trace if event['_scheduled_logical_turn_id'] == turn_id]
         attempt_children = [attempt for attempt in attempts if attempt["logical_turn_id"] == turn_id]
         traced_start = any(event["kind"] in {"turn_started", "audio_received", "commit_received"} for event in children)
         baseline = assignment["admission"] if assignment["admission_evidence_reference"] else "unknown"
@@ -224,10 +309,16 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
             admission_issues.append(issue)
         if "started" in claims:
             admission = "started"
-        trace_terminals = {event.get("terminal_outcome") for event in children
-                           if event["kind"] == "turn_ended" and event.get("terminal_outcome") is not None}
-        if len(trace_terminals) > 1 or (observation and observation.outcome and trace_terminals
-                                      and observation.outcome not in trace_terminals):
+        trace_terminals = [event for event in children if event['kind'] == 'turn_ended']
+        final_trace_outcome = trace_terminals[-1].get('terminal_outcome') if trace_terminals else None
+        transport_attempts[turn_id] = [{'observed_transport_turn_id': event['transport_turn_id'],
+            'observed_logical_turn_id': event['logical_turn_id'], 'session_id': event['session_id'],
+            'boot_id': event.get('boot_id'), 'connection_epoch': event['connection_epoch'],
+            'response_epoch': event['response_epoch'], 'kind': event['kind'],
+            'timestamp': event['timestamp'], 'clock_domain': event['clock_domain'],
+            'terminal_outcome': event.get('terminal_outcome')} for event in children
+            if event['kind'] in {'turn_started', 'turn_ended'}]
+        if observation and observation.outcome and final_trace_outcome and observation.outcome != final_trace_outcome:
             issue = "conflicting trace/driver terminal: " + turn_id
             local_integrity.append(issue)
             admission_issues.append(issue)
@@ -241,7 +332,7 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
         if admission != "unknown":
             assignment["admission_evidence_reference"] = (
                 "sha256:" + reader.verified["trace"] if traced_start else
-                "sha256:" + reader.verified["observations"] if observation and observation.admission != "unknown" else
+                "sha256:" + reader.verified[observation_name] if observation and observation.admission != "unknown" else
                 assignment["admission_evidence_reference"])
         reasons = [] if observation else ["missing driver terminal/source record"]
         reasons += local_integrity
@@ -271,21 +362,25 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
                         receipt = delta
                     else:
                         render = delta
-        outcome = (observation.outcome if observation and observation.outcome else
-                   next(iter(trace_terminals)) if len(trace_terminals) == 1 else "missing_terminal")
+        outcome = (final_trace_outcome or (observation.outcome if observation and observation.outcome else "missing_terminal"))
         if local_integrity:
             outcome = "missing_terminal"
         if outcome == "success" and (task_ok is False or spoken_ok is False):
             outcome = "task_failure"
+        trace_stages = _trace_stages(children)
+        supplied_stages = observation.stages if observation else []
+        if trace_stages:
+            supplied_stages = [stage for stage in supplied_stages if stage.get('name') != 'controller']
         row = TurnResult(run_id=manifest["run_id"], trial_id=assignment["trial_id"], logical_turn_id=turn_id,
             arm=assignment["arm"], outcome=outcome, task_correct=task_ok, spoken_correct=spoken_ok,
             receipt_latency_ms=receipt, render_latency_ms=render,
             timing_boundary="browser_output_timestamp_estimate" if render is not None else "receipt_only" if receipt is not None else "unknown",
             calibration_valid=calibration, unknown_reason="; ".join(sorted(set(reasons))) or None,
-            retry_count=observation.retry_count if observation else 0,
+            retry_count=max(observation.retry_count if observation else 0,
+                            max(0, len({event['transport_turn_id'] for event in children if event['kind'] == 'turn_started'}) - 1)),
             duplicate_count=observation.duplicate_count if observation else 0,
             cost_complete=bool(attempt_children) and all(attempt["state"] == "settled" for attempt in attempt_children),
-            stages=observation.stages if observation else [],
+            stages=supplied_stages + trace_stages,
             admission=admission if admission != "not_started" else "unknown",
             cohort=assignment["cohort"], task_id=assignment["task_id"], task_terminal=task_terminal,
             network_profile=assignment["network_profile"], model_version=assignment["model_version"],
@@ -301,6 +396,8 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
     manifest["turn_assignments"] = [assignments[turn] for turn in plan["scheduled_turns"]]
     return {"manifest": manifest, "rows": rows, "attempts": attempts, "ledger": ledger,
             "evidence": evidence, "gates": gates, "trace_integrity_issues": sorted(set(integrity + admission_issues)),
+            "driver_correlations": {**{key: conversion[key] for key in ('correlations', 'attempt_correlations', 'task_admissions', 'issues')},
+                                    'transport_attempts': transport_attempts},
             "source_hashes": dict(sorted(reader.verified.items())), "product_acceptance": False}
 
 
@@ -309,7 +406,7 @@ def write_evaluation(assembled: dict, out: str | Path) -> list[Path]:
     destination = Path(out)
     destination.mkdir(parents=True, exist_ok=True)
     names = {"manifest": "assembled-manifest.json", "ledger": "assembled-ledger.json",
-             "gates": "gate-status.json", "source_hashes": "source-hashes.json"}
+             "gates": "gate-status.json", "source_hashes": "source-hashes.json", 'driver_correlations': 'driver-correlations.json'}
     written = []
     for key, name in names.items():
         path = destination / name
@@ -321,5 +418,8 @@ def write_evaluation(assembled: dict, out: str | Path) -> list[Path]:
         path.write_bytes(b"".join(canonical_bytes(row) for row in assembled[key]))
         written.append(path)
     written += write_report(destination / names["manifest"], destination / "assembled-turns.jsonl",
-                            destination / names["ledger"], destination / "report")
+                            destination / names["ledger"], destination / "report",
+                            evidence_path=destination / 'assembled-evidence.jsonl',
+                            source_hashes_path=destination / 'source-hashes.json',
+                            driver_correlations_path=destination / 'driver-correlations.json')
     return written
