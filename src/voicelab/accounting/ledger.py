@@ -121,6 +121,8 @@ class AttemptLedger:
 
     def summary(self) -> dict:
         with self._connect() as db:
+            # Bind attempts, usage evidence and admission status to one read snapshot.
+            db.execute('BEGIN')
             rows = [dict(r) for r in db.execute('SELECT * FROM attempts ORDER BY attempt_id')]
             events = [dict(r) for r in db.execute('SELECT * FROM attempt_events ORDER BY sequence')]
             halted = db.execute("SELECT value FROM ledger_settings WHERE key='halted'").fetchone()
