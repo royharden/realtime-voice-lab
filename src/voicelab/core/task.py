@@ -20,6 +20,7 @@ class TaskAuthority:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS task_trials(
           namespace TEXT PRIMARY KEY, state TEXT NOT NULL, version INTEGER NOT NULL,
@@ -59,11 +60,32 @@ class TaskAuthority:
         self.db.execute("INSERT OR IGNORE INTO task_trials(namespace,state,version) VALUES(?, 'information', 0)", (namespace,))
 
     def set_epoch(self, trial_namespace: str, response_epoch: int) -> None:
+        if type(response_epoch) is not int or not 0 <= response_epoch <= 1_000_000:
+            raise ValueError("invalid_epoch")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self._ensure(trial_namespace)
+            changed = self.db.execute("UPDATE task_trials SET epoch=? WHERE namespace=? AND epoch<=?", (response_epoch, trial_namespace, response_epoch))
+            if changed.rowcount != 1:
+                raise ValueError("stale_epoch")
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def history(self, trial_namespace: str) -> dict[str, Any]:
+        """Bounded metadata export; original outcomes and duplicate attempts stay distinct."""
         self._ensure(trial_namespace)
-        row = self.db.execute("SELECT epoch FROM task_trials WHERE namespace=?", (trial_namespace,)).fetchone()
-        if response_epoch < row["epoch"]:
-            raise ValueError("stale_epoch")
-        self.db.execute("UPDATE task_trials SET epoch=? WHERE namespace=?", (response_epoch, trial_namespace))
+        total = self.db.execute("SELECT COUNT(*) FROM task_attempts WHERE namespace=?", (trial_namespace,)).fetchone()[0]
+        attempts = [dict(row) for row in self.db.execute("SELECT * FROM task_attempts WHERE namespace=? ORDER BY id LIMIT 256", (trial_namespace,))]
+        operations = [dict(row) for row in self.db.execute("SELECT * FROM task_operations WHERE namespace=? ORDER BY operation_id LIMIT 256", (trial_namespace,))]
+        for record in attempts + operations:
+            record["outcome"] = json.loads(record["outcome"])
+        for record in operations:
+            record["arguments"] = json.loads(record["arguments"])
+        return {"trial_namespace": trial_namespace, "task": self.snapshot(trial_namespace),
+            "original_operations": operations, "attempts": attempts, "attempt_count": total,
+            "truncated": total > len(attempts), "limit": 256}
 
     def snapshot(self, trial_namespace: str) -> dict[str, Any]:
         self._ensure(trial_namespace)

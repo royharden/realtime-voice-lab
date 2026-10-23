@@ -111,6 +111,60 @@ No file paths, socket addresses, task names or other-process metrics are returne
 The later soak driver samples every two seconds; this endpoint does not establish
 that the required soak or cleanup checks passed.
 
+## Lifecycle and metadata protocol
+
+The existing protocol version remains 1. The canonical typed parser accepts an
+additional exact client variant, with no free-text reason field:
+
+```json
+{"type":"client_status","outcome":"device_lost"}
+```
+
+Allowed outcomes are `permission_denied`, `device_lost`, `silence_timeout`,
+`abandoned`, and `unsupported_audio`. A session established after a permission/device
+failure can receive this observation; a failure before connection stays a browser
+observation and must not be claimed as a server-observed event. Explicit user retry
+starts a fresh capture/session; no failure automatically restarts microphone use.
+
+Ready frames add `run_id`, `trial_id`, `boot_id`, and `evidence_reference`. Ended
+frames preserve their old fields and add `outcome`, `outcome_source`, `trace`,
+`lifecycle_persisted`, `evidence_reference`, and unknown `spoken_correctness`.
+Errors include a named terminal outcome. Queue bounds map to `queue_overrun`, budget
+refusal to `budget_halt`, invalid protocol/identity/sequence to `protocol_error`,
+response timeout to `provider_timeout`, and exhausted ambiguous recovery to
+`recovery_unknown`. Ending a booked task can report session `success` without claiming
+the pending audio rendered or spoken correctness; an unfinished transport turn is
+`abandoned`. Interrupted transport attempts are recorded `expected_interruption`.
+
+The relay watchdog uses commit receipt on its own monotonic clock, never a browser
+speech-end timestamp. Recovery retains the original logical response deadline; its
+new transport turn does not reset that deadline. The browser must additionally enforce
+the speech-end boundary and detect actual silence/mute, which continuous silent PCM
+alone cannot establish at the relay. A reconnect claims a disconnected socket once,
+does not extend the original five-second window, and never replays old audio.
+
+After later activation, request `GET /sessions/{session_id}/evidence` with exact
+Origin and `X-Voicelab-Nonce` headers. It returns session/run/trial/boot metadata,
+started transport-turn identities and terminal states, artifact hashes/relative
+references, and the durable task's original operations plus duplicate attempts.
+The task-attempt export explicitly reports count, limit and truncation at 256 rows;
+SQLite retains the complete journal. This endpoint accepts an ID for SQL lookup,
+not an artifact path, and returns no raw audio/transcript/key. Runtime authorization
+and atomic durability still require later verification. Use one relay owner per
+artifact root: startup classifies unfinished prior-owner sessions `service_restart`,
+preserving task effects, accounting liability and original outcomes. It leaves old
+traces untouched and their missing terminals unknown. A reported lifecycle write
+failure or missing fsynced trace terminal cannot be treated as complete evidence.
+`GET /sessions/{session_id}/trace` uses the same boundary after terminal closure,
+returns at most 32 MB of metadata-only JSONL, and reports its actual SHA256 plus
+`X-Voicelab-Trace-Complete`. It refuses a stored-hash mismatch. A reconciled crash
+can export an incomplete trace but cannot turn that prefix into a terminal-complete
+measurement. The known session selects a registered relative reference; arbitrary
+paths are never accepted. Programmatic mock operators may set `Settings.run_id`
+and an optional `run_manifest_hash` to link a saved run; these are syntax-validated
+operator claims. The default remains `mock-local`; actual observed trial/session
+IDs stay distinct from planned IDs and require the saved mapping in INTERFACES.md.
+
 `VOICELAB_ARTIFACT_ROOT` selects local runtime artifacts (default `.agent-work/runtime`
 relative to activation cwd). Startup creates task/attempt SQLite files and bounded
 metadata traces there. Use an operator-controlled directory, outside public exports;

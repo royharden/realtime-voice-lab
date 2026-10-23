@@ -5,7 +5,7 @@ import base64
 import binascii
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 PROTOCOL_VERSION = 1
 SAMPLE_RATE = 24_000
@@ -13,6 +13,7 @@ MAX_FRAME_SAMPLES = 4_800
 MAX_MESSAGE_BYTES = 24_000
 Identifier = Annotated[str, Field(min_length=1, max_length=96, pattern=r"^[A-Za-z0-9_-]+$")]
 Epoch = Annotated[int, Field(strict=True, ge=0, le=1_000_000)]
+TerminalOutcome = Literal["success", "task_failure", "off_script", "permission_denied", "silence_timeout", "device_lost", "provider_error", "provider_timeout", "transport_loss", "service_restart", "abandoned", "queue_overrun", "calibration_invalid", "budget_halt", "expected_interruption", "recovery_unknown", "missing_terminal", "protocol_error", "unsupported_audio"]
 
 
 class Model(BaseModel):
@@ -78,13 +79,19 @@ class End(Model):
     type: Literal["end"]
 
 
+class ClientStatus(Model):
+    """A client observation, never authority to assert task/provider success."""
+    type: Literal["client_status"]
+    outcome: Literal["permission_denied", "device_lost", "silence_timeout", "abandoned", "unsupported_audio"]
+
+
 class Ping(Model):
     type: Literal["ping"]
     sequence: Annotated[int, Field(strict=True, ge=0, le=19)]
     browser_ms: Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
 
-ClientMessage = Annotated[Union[Hello, Audio, Commit, Interrupt, Rendered, Resume, End, Ping], Field(discriminator="type")]
+ClientMessage = Annotated[Union[Hello, Audio, Commit, Interrupt, Rendered, Resume, End, ClientStatus, Ping], Field(discriminator="type")]
 CLIENT_ADAPTER = TypeAdapter(ClientMessage)
 
 
@@ -108,7 +115,7 @@ class VoiceEvent(Model):
     connection_epoch: Epoch
     response_epoch: Epoch
     sequence: Annotated[int, Field(strict=True, ge=0)]
-    kind: Literal["session_started", "audio_received", "commit_received", "transcript", "controller_start", "controller_end", "audio_sent", "rendered_ack", "cancel_dispatch", "fence_applied", "stale_discarded", "reconnect", "repeat_requested", "effect_commit", "provider_event", "integrity_error", "session_ended", "error"]
+    kind: Literal["session_started", "turn_started", "turn_ended", "audio_received", "commit_received", "transcript", "controller_start", "controller_end", "audio_sent", "rendered_ack", "cancel_dispatch", "fence_applied", "stale_discarded", "reconnect", "repeat_requested", "effect_commit", "provider_event", "integrity_error", "session_ended", "error"]
     timestamp: Annotated[int | float, Field(ge=0, allow_inf_nan=False)]
     clock_domain: Literal["server_monotonic_ns", "browser_performance_ms", "audio_context_samples", "provider_unknown"]
     observation: Literal["observed", "estimated", "unknown"] = "observed"
@@ -117,6 +124,25 @@ class VoiceEvent(Model):
     sample_rate: Literal[24000] | None = None
     artifact_hash: Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")] = None
     content_hash: Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")] = None
+    terminal_outcome: TerminalOutcome | None = None
+    outcome_source: Literal["relay", "client_report", "restart_reconciliation"] | None = None
+    boot_id: Identifier | None = None
+    span_start_ns: Annotated[int | None, Field(strict=True, ge=0)] = None
+    span_end_ns: Annotated[int | None, Field(strict=True, ge=0)] = None
+    span_clock_domain: Literal["server_monotonic_ns"] | None = None
+
+    @model_validator(mode="after")
+    def integrity(self) -> VoiceEvent:
+        if self.clock_domain in {"server_monotonic_ns", "audio_context_samples"} and type(self.timestamp) is not int:
+            raise ValueError("integer_clock_timestamp_required")
+        if self.kind in {"turn_ended", "session_ended"} and self.terminal_outcome is None:
+            raise ValueError("terminal_outcome_required")
+        if self.span_start_ns is not None or self.span_end_ns is not None:
+            if self.span_start_ns is None or self.span_end_ns is None or self.span_end_ns < self.span_start_ns or self.span_clock_domain != "server_monotonic_ns":
+                raise ValueError("invalid_same_clock_span")
+            if self.clock_domain == "server_monotonic_ns" and self.span_end_ns > self.timestamp:
+                raise ValueError("span_ends_after_receipt")
+        return self
 
 
 class ServerMessage(Model):
@@ -134,7 +160,6 @@ def serialize_server(message: ServerMessage) -> str:
     return message.model_dump_json()
 
 
-TerminalOutcome = Literal["success", "task_failure", "off_script", "permission_denied", "silence_timeout", "device_lost", "provider_error", "provider_timeout", "transport_loss", "service_restart", "abandoned", "queue_overrun", "calibration_invalid", "budget_halt", "expected_interruption", "recovery_unknown", "missing_terminal"]
 Hash = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 
 
@@ -219,6 +244,11 @@ class ScheduledTurn(Model):
     pair_id: Identifier | None = None
     admission: Literal["scheduled", "started", "refused", "not_started", "unknown"] = "unknown"
     admission_evidence_reference: Annotated[str | None, Field(min_length=1, max_length=500)] = None
+    # Observed identities stay separate from immutable prespecified trial membership.
+    observed_trial_id: Identifier | None = None
+    observed_session_id: Identifier | None = None
+    observed_boot_id: Identifier | None = None
+    identity_evidence_reference: Annotated[str | None, Field(min_length=1, max_length=500)] = None
 
 
 class RunManifest(Model):

@@ -6,7 +6,7 @@
   "type": "object",
   "required": ["type"],
   "properties": {
-    "type": {"enum": ["hello", "audio", "commit", "interrupt", "rendered", "resume", "end", "ping"]},
+    "type": {"enum": ["hello", "audio", "commit", "interrupt", "rendered", "resume", "end", "ping", "client_status"]},
     "protocol_version": {"const": 1},
     "mode": {"enum": ["mock", "live"]},
     "arm": {"enum": ["V", "C", "K"]},
@@ -19,6 +19,7 @@
     "sample_rate": {"const": 24000},
     "pcm16": {"type": "string", "contentEncoding": "base64", "maxLength": 12800},
     "text": {"type": ["string", "null"], "maxLength": 500},
+    "outcome": {"enum": ["permission_denied", "device_lost", "silence_timeout", "abandoned", "unsupported_audio"]},
     "rendered_through_sample": {"type": "integer", "minimum": 0},
     "browser_ms": {"type": "number", "minimum": 0},
     "rendered_ack": {"type": ["object", "null"]}
@@ -31,7 +32,8 @@
     {"if": {"properties": {"type": {"const": "interrupt"}}}, "then": {"required": ["response_epoch", "rendered_through_sample"]}},
     {"if": {"properties": {"type": {"const": "rendered"}}}, "then": {"required": ["response_id", "rendered_through_sample"]}},
     {"if": {"properties": {"type": {"const": "resume"}}}, "then": {"required": ["connection_epoch"]}},
-    {"if": {"properties": {"type": {"const": "ping"}}}, "then": {"required": ["sequence", "browser_ms"], "properties": {"sequence": {"maximum": 19}}}}
+    {"if": {"properties": {"type": {"const": "ping"}}}, "then": {"required": ["sequence", "browser_ms"], "properties": {"sequence": {"maximum": 19}}}},
+    {"if": {"properties": {"type": {"const": "client_status"}}}, "then": {"required": ["outcome"]}}
   ],
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9_-]+$"},

@@ -65,6 +65,32 @@ liability; mock attempts reserve and settle zero with an explicit no-provider ba
 The model vocabulary also defines run manifests, turn results and evidence records;
 no fixture seal or result record is fabricated by starting a session.
 
+The relay now also journals lifecycle metadata in `task.sqlite3`: a process boot ID,
+run/trial/session membership, each started transport turn and its stable logical turn,
+first terminal outcomes, and approved artifact references. The single relay owner's
+startup marks prior unterminated sessions/turns `service_restart` without rewriting
+old trace files or declaring their missing terminal complete. Task effects, original
+operation outcomes, duplicate attempts and accounting liability remain separate.
+`GET /sessions/{session_id}/evidence` exports this metadata behind the same exact
+Host/Origin/nonce boundary as diagnostics. It does not expose audio or transcripts.
+
+A relay watchdog enforces 120 seconds per session, ten seconds from the original
+server commit receipt for a response (including recovery), and eight seconds without
+input while listening/capturing. The browser owns actual speech/no-speech observation
+and the original speech-end deadline; server receipt is not speech end and clocks are
+not subtracted across domains. A `client_status` frame reports a bounded client-side
+permission/device/silence/abandonment/unsupported-audio outcome. It is labeled
+`client_report`, never promoted to independently verified evidence or task success.
+End/terminal shutdown advances both audio and durable-effect epochs before awaiting
+cleanup. A response remains active until valid response completion plus rendered ACK;
+PCM after completion, invalid identities, duplicates/reordering and overruns fail closed.
+
+Trace rows reserve capacity for one explicit session terminal, retain integer
+monotonic timestamps scoped to the boot ID, and fsync that terminal before marking it
+durable. Observable controller spans keep their own explicit same-clock nanosecond
+bounds rather than substituting provider-private timing. Relay `success` describes
+the controller/render path or booked task state only; spoken correctness remains unknown.
+
 Later validation must exercise full browser→relay→wire parser→authority→playback→ledger
 journeys, cancellation, reconnect and cleanup, before offline evidence is admissible.
 Licensed fixtures, calibration, independent heldout custody, approved provider/budget
