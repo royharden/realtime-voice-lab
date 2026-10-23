@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from .browser import BrowserDriver, snapshot, trace_export, server_evidence, collect_relay_trace
+from .browser import BrowserDriver, snapshot, trace_export, server_evidence, collect_relay_trace, collect_ledger_snapshot
 from .activation import bind_task_fixture
 from .faults import MockControls, effect_observation
 
@@ -318,6 +318,11 @@ async def run_journeys(spec: dict, nonce: str, sink, *, plan: dict | None = None
                                 raw = collect_relay_trace(spec, evidence)
                                 references[f'trace-{number}'] = sink.bytes_artifact(
                                     f'server-trace-{number:03d}.jsonl', raw, 'trace')
+                                ledger = sink.authoritative_artifact(collect_ledger_snapshot(spec, evidence), 'ledger_snapshot')
+                                references[f'ledger-{number}'] = ledger
+                                sink.emit('ledger_snapshot_reference', task_id=task['task_id'],
+                                    session_id=task['_session_id'], server_run_id=task.get('_server_run_id'),
+                                    scope='run_snapshot', references={'ledger': ledger})
                             except (OSError, ValueError, KeyError):
                                 incomplete.append(task['task_id'] + '-server-trace')
                                 sink.emit('server_trace_unknown', observation='unknown',

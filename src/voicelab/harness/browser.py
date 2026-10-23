@@ -12,51 +12,11 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from .activation import loopback_url, owned_file
 
 
-def metadata(value: object) -> object:
-    """No launch nonce, raw capture/output PCM, URLs, or arbitrary exception strings."""
-    if isinstance(value, dict):
-        return {key: metadata(item) for key, item in value.items()
-                if key not in {'nonce', 'pcm16', 'audio', 'samples', 'url', 'authorization', 'api_key',
-                               'text', 'transcript', 'transcripts', 'raw_transcript'}}
-    if isinstance(value, list):
-        return [metadata(item) for item in value]
-    return value
+# One canonical producer projection, also enforced by EvidenceSink before writes.
+from .privacy import observed_metadata
 
-
-WIRE_FIELDS = frozenset({
-    'type', 'protocol_version', 'payload', 'mode', 'arm', 'run_id', 'trial_id', 'trial_namespace',
-    'boot_id', 'session_id', 'turn_id', 'logical_turn_id', 'transport_turn_id', 'response_id',
-    'operation_id', 'logical_operation_id', 'attempt_id', 'sequence', 'connection_epoch',
-    'response_epoch', 'sample_rate', 'sample_offset', 'rendered_through_sample', 'state',
-    'kind', 'code', 'outcome', 'terminal', 'reason', 'terminal_outcome', 'outcome_source',
-    'clock_domain', 'timestamp', 'span_start_ns', 'span_end_ns', 'span_clock_domain',
-    'artifact_hash', 'content_hash', 'artifact_persisted', 'trace_hash', 'trace', 'trace_reference',
-    'trace_complete', 'event_count', 'terminal_present', 'boot_id', 'evidence_reference',
-    'resume_required', 'audio_replayed', 'fence_epoch', 'task', 'booking', 'slot_id',
-    'state_version', 'effect_committed', 'duplicate', 'ok', 'spoken_correctness', 'synthetic',
-    'ledger', 'attempts', 'events', 'budget', 'known_cost', 'unknown_count', 'unknown_exposure',
-    'total_exposure', 'complete', 'currency', 'component', 'reservation', 'settled',
-    'price_version', 'source', 'usage', 'provider_requests', 'admission_halted',
-    'control_id', 'seed', 'status', 'simulation', 'effect', 'lifecycle_persisted',
-})
-
-
-def wire_metadata(value: object) -> object:
-    if isinstance(value, dict):
-        result = {}
-        for key, item in value.items():
-            if key not in WIRE_FIELDS:
-                continue
-            if key == 'payload' and isinstance(item, str):
-                try:
-                    item = json.loads(item)
-                except ValueError:
-                    continue
-            result[key] = wire_metadata(item)
-        return result
-    if isinstance(value, list):
-        return [wire_metadata(item) for item in value]
-    return value
+metadata = observed_metadata
+wire_metadata = observed_metadata
 
 
 def own_diagnostic(spec: dict, nonce: str, path: str = '/diagnostics') -> dict:
@@ -83,6 +43,8 @@ class BrowserDriver:
         self.contexts = []
 
     async def __aenter__(self):
+        if not self.spec.get('_input_wav'):
+            raise ValueError('actual reviewed microphone fixture binding required before browser activation')
         # Verify the intended own relay is mock before creating a browser.
         health = await asyncio.to_thread(own_diagnostic, self.spec, self.nonce, '/health')
         if health.get('mode') != 'mock' or health.get('protocol_version') != 1:
@@ -167,7 +129,7 @@ class BrowserDriver:
                                logical_turn_id=task.get('_logical_turn_id'),
                                session_id=task.get('_session_id'),
                                server_trial_namespace=task.get('_trial_namespace'),
-                               message=clean, browser_clock_observed=False)
+                               message_metadata=clean, browser_clock_observed=False)
             except (ValueError, TypeError):
                 self.sink.emit('wire_parse_error', task_id=task['task_id'], arm=task['arm'],
                                direction=direction, byte_length=len(raw))
@@ -226,4 +188,20 @@ def collect_relay_trace(spec: dict, evidence: dict) -> bytes:
     raw = owned_file(root, f'traces/{name}.jsonl', maximum=16_000_000).read_bytes()
     if not session.get('trace_complete') or hashlib.sha256(raw).hexdigest() != session.get('trace_hash'):
         raise ValueError('trace missing durable terminal or mismatched authoritative hash')
+    return raw
+
+
+def collect_ledger_snapshot(spec: dict, evidence: dict) -> bytes:
+    meta = evidence.get('ledger_artifact') or {}
+    session = evidence['session']['session_id']
+    digest = meta.get('artifact_hash', '')
+    if meta.get('kind') != 'ledger_snapshot' or not re.fullmatch(r'[a-f0-9]{64}', digest):
+        raise ValueError('saved authoritative ledger artifact unknown')
+    reference = f'evidence-snapshots/{session}-ledger_snapshot-{digest}.json'
+    if meta.get('artifact_reference') != reference:
+        raise ValueError('saved ledger reference does not bind the observed session/hash')
+    root = Path(spec['relay_artifact_root']).resolve(strict=True)
+    raw = owned_file(root, reference, maximum=32_000_000).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError('saved ledger snapshot hash mismatch')
     return raw

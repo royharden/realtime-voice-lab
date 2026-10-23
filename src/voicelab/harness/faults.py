@@ -44,7 +44,7 @@ class MockControls:
                 or receipt.get('run_id') != task.get('_server_run_id')
                 or receipt.get('trial_id') != task.get('_trial_namespace')
                 or receipt.get('seed') != policy['seed']
-                or receipt.get('status') not in {'armed', 'applied', 'refused'}):
+                or receipt.get('status') not in {'armed', 'applied', 'unresolved'}):
             raise ValueError('fault receipt identity/policy mismatch')
         return receipt
 
@@ -65,8 +65,8 @@ class MockControls:
 
 
 def effect_observation(kind: str, proof: dict) -> tuple[str, str]:
-    if proof.get('receipt', {}).get('status') == 'refused':
-        return 'unknown', 'mock_fault_control_refused'
+    if proof.get('receipt', {}).get('status') == 'unresolved':
+        return 'unknown', 'mock_fault_control_unresolved'
     evidence = proof.get('evidence', {})
     if kind == 'service_restart':
         if evidence.get('session', {}).get('terminal_outcome') == 'service_restart':

@@ -6,6 +6,8 @@ import json
 import time
 from pathlib import Path
 
+from .privacy import observed_metadata, decoded_metadata
+
 
 def canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
@@ -21,6 +23,7 @@ class EvidenceSink:
         self.spec_hash = spec['_manifest_hash']
         self.counts: dict[str, int] = {}
         self.closed = False
+        self.authoritative_references: dict[tuple[str, str], dict] = {}
 
     def emit(self, kind: str, *, observation: str = 'observed', **fields: object) -> None:
         if self.closed or self.sequence >= (100_000 if kind == 'driver_ended' else 99_999):
@@ -31,20 +34,40 @@ class EvidenceSink:
                'sequence': self.sequence, 'timestamp': time.monotonic_ns(),
                'clock_domain': 'driver_monotonic_ns', 'observation': observation,
                'mode': 'mock', 'split': 'dev', **fields}
-        self.handle.write(canonical(row))
+        self.handle.write(canonical(observed_metadata(row)))
         self.handle.flush()
         self.sequence += 1
         self.counts[kind] = self.counts.get(kind, 0) + 1
 
     def artifact(self, name: str, value: object, kind: str) -> dict:
-        return self.bytes_artifact(name, canonical(value), kind)
+        return self.bytes_artifact(name, canonical(observed_metadata(value)), kind)
 
     def bytes_artifact(self, name: str, raw: bytes, kind: str) -> dict:
         if Path(name).name != name:
             raise ValueError('flat owned output name required')
+        if kind == 'trace':
+            # Preserve exact authoritative hashes only when every raw trace row is
+            # already metadata-only. Reject before persistence; never scrub then
+            # mislabel the changed bytes with the producer's original digest.
+            for line in raw.decode('utf-8').splitlines():
+                if line.strip():
+                    value = decoded_metadata(json.loads(line))
+                    if not isinstance(value, dict) or observed_metadata(value) != value:
+                        raise ValueError('authoritative trace contains unapproved metadata/content fields')
+        if kind in {'ledger_snapshot', 'fault_controls'}:
+            value = decoded_metadata(json.loads(raw))
+            if not isinstance(value, dict) or observed_metadata(value) != value:
+                raise ValueError('authoritative snapshot contains unapproved metadata/content fields')
         with (self.root / name).open('xb') as handle:
             handle.write(raw)
         return {'path': name, 'kind': kind, 'sha256': hashlib.sha256(raw).hexdigest()}
+
+    def authoritative_artifact(self, raw: bytes, kind: str) -> dict:
+        digest = hashlib.sha256(raw).hexdigest()
+        key = (kind, digest)
+        if key not in self.authoritative_references:
+            self.authoritative_references[key] = self.bytes_artifact(kind + '-' + digest + '.json', raw, kind)
+        return self.authoritative_references[key]
 
     def close(self, *, completed: bool, reason: str, references: dict | None = None) -> None:
         if self.closed:
