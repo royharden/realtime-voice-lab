@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:voicelab:wire:1",
+  "title": "Realtime Voice Lab wire v1 reference",
+  "description": "Canonical runtime validation is src/voicelab/contracts.py. Client discriminator inventory and common bounds; consumers must honor the documented variant fields.",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {"enum": ["hello", "audio", "commit", "interrupt", "rendered", "resume", "end", "ping"]},
+    "protocol_version": {"const": 1},
+    "mode": {"const": "mock"},
+    "arm": {"enum": ["V", "C", "K"]},
+    "nonce": {"type": "string", "minLength": 16, "maxLength": 128},
+    "turn_id": {"$ref": "#/$defs/id"},
+    "response_id": {"$ref": "#/$defs/id"},
+    "connection_epoch": {"$ref": "#/$defs/epoch"},
+    "response_epoch": {"$ref": "#/$defs/epoch"},
+    "sequence": {"type": "integer", "minimum": 0, "maximum": 100000},
+    "sample_rate": {"const": 24000},
+    "pcm16": {"type": "string", "contentEncoding": "base64", "maxLength": 12800},
+    "text": {"type": ["string", "null"], "maxLength": 500},
+    "rendered_through_sample": {"type": "integer", "minimum": 0},
+    "browser_ms": {"type": "number", "minimum": 0},
+    "rendered_ack": {"type": ["object", "null"]}
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {"if": {"properties": {"type": {"const": "hello"}}}, "then": {"required": ["protocol_version", "mode", "arm", "nonce"]}},
+    {"if": {"properties": {"type": {"const": "audio"}}}, "then": {"required": ["turn_id", "connection_epoch", "response_epoch", "sequence", "sample_rate", "pcm16"]}},
+    {"if": {"properties": {"type": {"const": "commit"}}}, "then": {"required": ["turn_id", "connection_epoch", "response_epoch"]}},
+    {"if": {"properties": {"type": {"const": "interrupt"}}}, "then": {"required": ["response_epoch", "rendered_through_sample"]}},
+    {"if": {"properties": {"type": {"const": "rendered"}}}, "then": {"required": ["response_id", "rendered_through_sample"]}},
+    {"if": {"properties": {"type": {"const": "resume"}}}, "then": {"required": ["connection_epoch"]}},
+    {"if": {"properties": {"type": {"const": "ping"}}}, "then": {"required": ["sequence", "browser_ms"], "properties": {"sequence": {"maximum": 19}}}}
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9_-]+$"},
+    "epoch": {"type": "integer", "minimum": 0, "maximum": 1000000}
+  }
+}
