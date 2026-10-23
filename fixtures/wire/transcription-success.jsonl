@@ -1,0 +1,2 @@
+{"type":"conversation.item.input_audio_transcription.delta","item_id":"input-2","content_index":0,"delta":"select "}
+{"type":"conversation.item.input_audio_transcription.completed","item_id":"input-2","content_index":0,"transcript":"select slot 1"}

@@ -1,0 +1,7 @@
+# Synthetic wire examples
+
+These small author-created fixtures are diagnostic data, never recorded provider responses, licensed speech, model compatibility proof, or measured evidence. `native-success.jsonl` and `native-faults.jsonl` enter `parse_realtime`; `transcription-success.jsonl` enters `parse_transcription`. Raw PCM TTS uses `pcm_chunk` directly because the selected format is a byte stream, not JSON. Odd byte counts, oversized chunks and wrong sample rates are rejected. The tiny native PCM frame is a sample-format fixture, not speech.
+
+The runtime keyless adapters generate equivalent wire-shaped payloads and traverse those same parser/serializer functions. V mock proposals come from the deterministic matcher; C mock input comes from explicit debug text. Neither performs recognition or native reasoning. Cancel serializes a native cancel plus rendered-cutoff truncate; no provider acknowledges it in this construction. The local synthetic wire envelope in `wire.py` is versioned and used for mock lifecycle notices only.
+
+Missing usage is `None`, not zero. An adapter connected to a future billable transport must mark its reservation unknown at cancellation/error/missing usage. No live transport is instantiated. Future validation must cover malformed/reordered/duplicate frames, missing/late/duplicate usage, canceled-but-billed responses, and error before/after charging through the integrated path. None of these fixtures were executed during Dirty Mode.
