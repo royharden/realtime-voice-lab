@@ -239,10 +239,24 @@ def _oracle(row: dict | None, *, manifest: dict, assignment: dict, journal_hash:
 
 
 def prepare_inputs(bundle: dict, artifact_root: str | Path, *, expected_freeze_hash: str | None = None,
-                   verify_release: ReleaseVerifier | None = None) -> tuple:
+                   verify_release: ReleaseVerifier | None = None, public_access=None) -> tuple:
     """Shared prospective-run and saved-evidence gates; no client/provider execution."""
-    reader = ArtifactReader(artifact_root, bundle["artifacts"])
+    from .custody import PublicCustodyManifest
+    from .exposure import PrivateExposureUse, PublicReadAccess
+    public = PublicCustodyManifest.model_validate(bundle['public_manifest']).model_dump(mode='json')
+    if bundle['artifacts']['manifest']['sha256'] != public['manifest_sha256']:
+        raise ValueError('public scope does not pin actual run manifest')
+    if isinstance(verify_release, PrivateExposureUse):
+        reader = verify_release.reader(artifact_root, bundle['artifacts'])
+    elif public['split'] == 'heldout':
+        raise ValueError('private access requires actual redeemed in-memory exact use, not a callback/receipt flag')
+    else:
+        if not isinstance(public_access, PublicReadAccess):
+            raise ValueError('actual external public-dev read/rights proof required; no CLI flag grants access')
+        reader = public_access.reader(artifact_root, bundle['artifacts'])
     manifest = RunManifest.model_validate(reader.json("manifest", "manifest")).model_dump(mode="json")
+    if any(manifest[key] != value for key, value in public.items() if key != 'manifest_sha256'):
+        raise ValueError('public scope mismatches actual manifest; no plan/fixture access')
     plan = reader.json("plan", "plan")
     validate_trial_plan(plan)
     if manifest["split"] == "heldout" and verify_release is None:
@@ -253,8 +267,8 @@ def prepare_inputs(bundle: dict, artifact_root: str | Path, *, expected_freeze_h
     fixture_manifest = reader.json("fixtures", "fixtures")
     if reader.verified["fixtures"] != manifest["fixture_manifest_hash"]:
         raise ValueError("fixture manifest not pinned by run manifest")
-    freeze = reader.json("freeze", "freeze") if "freeze" in bundle["artifacts"] else None
-    release = reader.json("release", "release") if "release" in bundle["artifacts"] else None
+    freeze = bundle.get('public_freeze')
+    release = bundle.get('public_release')
     gates = validate_gates(manifest, plan, fixture_manifest, freeze, reader,
                            expected_freeze_hash=expected_freeze_hash, release=release, verify_release=verify_release)
     return reader, manifest, plan, gates
@@ -263,10 +277,10 @@ def prepare_inputs(bundle: dict, artifact_root: str | Path, *, expected_freeze_h
 def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
                         expected_freeze_hash: str | None = None,
                         verify_release: ReleaseVerifier | None = None,
-                        verify_oracle: Callable[[dict], bool] | None = None) -> dict:
+                        verify_oracle: Callable[[dict], bool] | None = None, public_access=None) -> dict:
     """No I/O effects except bounded reads. Trust callbacks come from operator code, never artifacts."""
     reader, manifest, plan, gates = prepare_inputs(bundle, artifact_root,
-        expected_freeze_hash=expected_freeze_hash, verify_release=verify_release)
+        expected_freeze_hash=expected_freeze_hash, verify_release=verify_release, public_access=public_access)
     assignments = {row["logical_turn_id"]: ScheduledTurn.model_validate(row).model_dump(mode="json")
                    for row in plan["turn_assignments"]}
     manifest_assignments = _index(manifest["turn_assignments"], "logical_turn_id")
@@ -482,6 +496,7 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
         evidence.append({"logical_turn_id": turn_id, "record": record})
     manifest["turn_assignments"] = [assignments[turn] for turn in plan["scheduled_turns"]]
     return {"manifest": manifest, "rows": rows, "attempts": attempts, "ledger": ledger,
+            '_access_reader': reader,
             "evidence": evidence, "gates": gates, "trace_integrity_issues": sorted(set(integrity + admission_issues)),
             'review_bindings': review_bindings,
             "driver_correlations": {**{key: conversion[key] for key in ('correlations', 'attempt_correlations', 'task_admissions', 'issues')},
@@ -492,19 +507,24 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
 def write_evaluation(assembled: dict, out: str | Path) -> list[Path]:
     """Later activation only: deterministic assembly artifacts, then the existing reporter."""
     destination = Path(out)
-    destination.mkdir(parents=True, exist_ok=True)
+    from .exposure import require_output_root
+    require_output_root(assembled.get('_access_reader'), destination.parent)
+    destination.mkdir(parents=False, exist_ok=False)
     names = {"manifest": "assembled-manifest.json", "ledger": "assembled-ledger.json",
              "gates": "gate-status.json", "source_hashes": "source-hashes.json", 'driver_correlations': 'driver-correlations.json'}
     written = []
     for key, name in names.items():
+        require_output_root(assembled['_access_reader'], destination.parent)
         path = destination / name
         path.write_bytes(canonical_bytes(assembled[key]))
         written.append(path)
     for key, name in (("rows", "assembled-turns.jsonl"), ("attempts", "assembled-attempts.jsonl"),
                       ("evidence", "assembled-evidence.jsonl")):
+        require_output_root(assembled['_access_reader'], destination.parent)
         path = destination / name
         path.write_bytes(b"".join(canonical_bytes(row) for row in assembled[key]))
         written.append(path)
+    require_output_root(assembled['_access_reader'], destination.parent)
     written += write_report(destination / names["manifest"], destination / "assembled-turns.jsonl",
                             destination / names["ledger"], destination / "report",
                             evidence_path=destination / 'assembled-evidence.jsonl',

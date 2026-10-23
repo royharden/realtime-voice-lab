@@ -235,11 +235,11 @@ def validate_packet(packet: dict) -> None:
 
 def prepare_review_packet(bundle: dict, artifact_root: str | Path, task_id: str, *,
                           expected_freeze_hash: str | None = None,
-                          verify_release: ReleaseVerifier | None = None) -> dict:
+                          verify_release: ReleaseVerifier | None = None, public_access=None) -> dict:
     # Reuse the canonical join/gates, leaving the oracle absent. This never runs
     # the report writer, experiment, audio playback or a provider/model.
     assembled = assemble_evaluation(bundle, artifact_root, expected_freeze_hash=expected_freeze_hash,
-                                    verify_release=verify_release)
+                                    verify_release=verify_release, public_access=public_access)
     selected = [item for item in assembled['review_bindings'] if item['bindings']['task_id'] == task_id]
     for item in selected:
         if len(item['evidence_gaps']) > 100:
@@ -359,6 +359,7 @@ def append_decision(root: str | Path, packet: dict, submission: dict, *,
 def export_oracle(packet: dict, records: list[dict], *, artifact_root: str | Path | None = None,
                   authority: ExternalAuthority | None = None,
                   expected_head: str | None = None,
+                  artifact_reader: ArtifactReader | None = None,
                   excluded_actor_refs: frozenset[str] = frozenset()) -> tuple[list[dict], Callable[[dict], bool]]:
     """Return canonical oracle rows and an in-memory verifier for the existing assembler.
 
@@ -387,11 +388,14 @@ def export_oracle(packet: dict, records: list[dict], *, artifact_root: str | Pat
         for role, reference in item['artifacts'].items():
             if reference is None:
                 gaps.append('missing required review artifact: ' + role)
-        if artifact_root is None:
-            gaps.append('packet artifact bytes not revalidated at export')
+        if artifact_reader is None:
+            gaps.append('actual artifact read authority missing; no media bytes opened at export')
         else:
+            from .exposure import aliased_reader
+            if artifact_root is not None and Path(artifact_root).resolve(strict=True) != artifact_reader.root:
+                raise ValueError('review export owned root differs from actual read context')
             references = {key: value for key, value in item['artifacts'].items() if value is not None}
-            reader = ArtifactReader(artifact_root, references)
+            reader = aliased_reader(artifact_reader, references)
             for name, reference in references.items():
                 if reference['kind'] == 'audio':
                     reader.audio(name)

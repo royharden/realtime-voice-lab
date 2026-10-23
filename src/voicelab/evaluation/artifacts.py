@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 
 
@@ -12,6 +14,26 @@ def canonical_bytes(value: object) -> bytes:
 
 def digest(value: object) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def owned_file_metadata(root: Path, relative: str, *, maximum: int) -> tuple[Path, tuple]:
+    name = Path(relative)
+    if name.is_absolute() or name.drive or '..' in name.parts or not name.parts or ':' in relative:
+        raise ValueError('relative owned artifact path required')
+    path = root
+    for component in name.parts:
+        path = path / component
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+            raise ValueError('artifact symlink/reparse component refused')
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > maximum
+            or not path.resolve(strict=True).is_relative_to(root)):
+        raise ValueError('artifact escapes root, is not a regular file or exceeds bound')
+    return path, file_identity(info)
+
+
+def file_identity(info) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 class ArtifactReader:
@@ -24,15 +46,22 @@ class ArtifactReader:
         reference = self.references[name]
         if reference.get("kind") != kind:
             raise ValueError("artifact kind mismatch: " + name)
-        relative = Path(reference["path"])
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError("artifact must be a relative owned path")
-        path = (self.root / relative).resolve(strict=True)
-        if not path.is_relative_to(self.root) or not path.is_file() or path.stat().st_size > maximum:
-            raise ValueError("artifact escapes root or exceeds size bound")
-        raw = path.read_bytes()
-        if len(raw) > maximum:
-            raise ValueError("artifact grew beyond size bound")
+        path, identity = owned_file_metadata(self.root, reference['path'], maximum=maximum)
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        descriptor = os.open(path, flags)
+        try:
+            with os.fdopen(descriptor, 'rb') as stream:
+                descriptor = None
+                if file_identity(os.fstat(stream.fileno())) != identity:
+                    raise ValueError('artifact changed before byte access')
+                raw = stream.read(maximum + 1)
+                if file_identity(os.fstat(stream.fileno())) != identity:
+                    raise ValueError('artifact changed while reading')
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        if len(raw) > maximum or owned_file_metadata(self.root, reference['path'], maximum=maximum)[1] != identity:
+            raise ValueError('artifact identity/path changed after read')
         actual = hashlib.sha256(raw).hexdigest()
         if reference.get("sha256") != actual:
             raise ValueError("artifact hash mismatch: " + name)

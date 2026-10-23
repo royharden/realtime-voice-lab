@@ -240,6 +240,7 @@ def _new_stage(stage_root: str | Path, stage_name: str, bundle_root: Path) -> Pa
 
 def reproduce_reports(bundle_root: str | Path, expectation_path: str, *, expectation_sha256: str,
                        stage_root: str | Path, stage_name: str,
+                       access_reader: ArtifactReader | None = None,
                        authority: ExternalAuthority | None = None,
                        excluded_actor_refs: frozenset[str] = frozenset()) -> dict:
     """Validate a sealed bundle, regenerate once and compare exact byte/file sets.
@@ -280,7 +281,13 @@ def reproduce_reports(bundle_root: str | Path, expectation_path: str, *, expecta
         paths = [reference['path'] for reference in references.values()] + [r['path'] for r in expected['expected_outputs'].values()] + [expectation_path]
         if len(paths) != len(set(paths)):
             raise ReproductionDifference('aliased_immutable_bundle_paths', 'inputs_or_expected_outputs')
-        reader = ArtifactReader(root, references)
+        from .exposure import aliased_reader, require_output_root, validate_read_access
+        if access_reader is None:
+            raise ReproductionDifference('actual_read_authority_missing_no_dataset_access', 'inputs')
+        validate_read_access(access_reader, private_required=expected['pins']['split'] == 'heldout')
+        if access_reader.root != root:
+            raise ReproductionDifference('authorized_read_root_mismatch', 'inputs')
+        reader = aliased_reader(access_reader, references)
         manifest_raw = _read(reader, 'manifest', 'manifest')
         try:
             manifest = RunManifest.model_validate(_json(manifest_raw, 'manifest')).model_dump(mode='json')
@@ -315,11 +322,12 @@ def reproduce_reports(bundle_root: str | Path, expectation_path: str, *, expecta
         rows = [_json(line.encode('utf-8'), 'turns') for line in raw['turns'].decode('utf-8').splitlines() if line.strip()]
         if 'oracle' not in raw and any(row.get('task_correct') is True or row.get('spoken_correct') is True for row in rows):
             raise ReproductionDifference('positive_correctness_without_pinned_oracle', 'oracle')
-        expected_reader = ArtifactReader(root, expected['expected_outputs'])
+        expected_reader = aliased_reader(access_reader, expected['expected_outputs'])
         for name in sorted(REPORT_OUTPUT_FILES):
             if expected['expected_outputs'][name]['kind'] != 'report_output':
                 raise ReproductionDifference('expected_output_kind_mismatch', name)
             _read(expected_reader, name, 'report_output')
+        require_output_root(access_reader, stage_root)
         stage = _new_stage(stage_root, stage_name, root)
         with (stage / '.reproduction-owner.json').open('xb') as stream:
             stream.write(canonical_bytes({'schema_version': 1, 'run_id': manifest['run_id'],
@@ -329,6 +337,7 @@ def reproduce_reports(bundle_root: str | Path, expectation_path: str, *, expecta
         inputs.mkdir(exist_ok=False)
         copied = {}
         for name, content in sorted(raw.items()):
+            require_output_root(access_reader, stage_root)
             path = inputs / (name + ('.jsonl' if name in {'turns', 'trace', 'oracle', 'evidence'} else '.json'))
             with path.open('xb') as stream:
                 stream.write(content)
@@ -337,6 +346,7 @@ def reproduce_reports(bundle_root: str | Path, expectation_path: str, *, expecta
             ('evidence_path', 'evidence'), ('source_hashes_path', 'source_hashes'),
             ('driver_correlations_path', 'driver_correlations')) if name in copied}
         try:
+            require_output_root(access_reader, stage_root)
             (stage / 'regenerated').mkdir(exist_ok=False)
             write_report(copied['manifest'], copied['turns'], copied['ledger'], stage / 'regenerated', **optional)
         except (ValueError, KeyError, TypeError, OSError) as error:
@@ -374,9 +384,10 @@ def reproduce_reports(bundle_root: str | Path, expectation_path: str, *, expecta
     if stage is not None:
         # Fixed name in this invocation's brand-new owned stage only; never inputs/docs.
         try:
+            require_output_root(access_reader, stage_root)
             with (stage / 'comparison.json').open('xb') as stream:
                 stream.write(canonical_bytes(result))
-        except OSError:
+        except (OSError, ValueError):
             result.update(status='refused', reproduced=False)
             result['differences'].append({'kind': 'comparison_write_refused', 'name': 'comparison.json',
                                            'expected': None, 'actual': None})

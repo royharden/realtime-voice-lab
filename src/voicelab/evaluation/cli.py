@@ -65,12 +65,24 @@ def main(argv: list[str] | None = None) -> int:
     reproduce.add_argument('--expectation-sha256', required=True, help='externally retained exact expectation-file hash')
     reproduce.add_argument('--stage-root', required=True, help='existing explicitly owned output parent')
     reproduce.add_argument('--stage-name', required=True, help='fresh single directory name; never reused')
+    retention = sub.add_parser('retention-plan', help='metadata-only declared expiry proposals; no delete/execute mode')
+    retention.add_argument('--inventory', required=True, help='explicit public retention metadata JSON')
+    retention.add_argument('--artifact-root', required=True)
+    retention.add_argument('--as-of', required=True, help='explicit offset timestamp used only as planning cutoff')
+    retention.add_argument('--out', required=True)
     args = parser.parse_args(argv)
     if args.command == "plan":
         result = create_trial_plan(json.loads(Path(args.request).read_text(encoding="utf-8")))
         # Exclusive creation: changing a published plan requires a new file and cohort.
         with Path(args.out).open("xb") as stream:
             stream.write(canonical_bytes(result))
+    elif args.command == 'retention-plan':
+        from .retention import inspect_retention
+        plan = inspect_retention(json.loads(Path(args.inventory).read_text(encoding='utf-8')),
+                                  args.artifact_root, as_of=args.as_of)
+        with Path(args.out).open('xb') as stream:
+            stream.write(canonical_bytes(plan))
+        return 0 if plan['authority_verified'] and plan['owned_root_verified'] else 1
     elif args.command == 'reproduce':
         from .reproduction import reproduce_reports
         comparison = reproduce_reports(args.bundle_root, args.expectation,
@@ -136,13 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if not args.rows or not args.ledger:
             parser.error('canonical --manifest report requires --rows and --ledger')
-        supplied_manifest = json.loads(Path(args.manifest).read_text(encoding='utf-8'))
-        if supplied_manifest.get('split') != 'dev':
-            parser.error('direct CLI reporting is dev-only; heldout needs externally verified programmatic assembly')
-        from voicelab.reporting import write_report
-        write_report(args.manifest, args.rows, args.ledger, args.out,
-                     evidence_path=args.evidence, source_hashes_path=args.source_hashes,
-                     driver_correlations_path=args.driver_correlations)
+        parser.error('direct path reporting has no actual read verifier; use an authorized programmatic read context')
     return 0
 
 

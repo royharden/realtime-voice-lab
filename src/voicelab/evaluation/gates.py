@@ -23,7 +23,8 @@ def freeze_matches(manifest: dict, freeze: dict | None, expected_hash: str | Non
 
 
 def release_matches(manifest: dict, release: dict, freeze_hash: str | None) -> bool:
-    return (bool(manifest['fixture_seal']) and release.get('run_id') == manifest['run_id'] and release.get('freeze_hash') == freeze_hash
+    return (bool(manifest['fixture_seal']) and release.get('run_id') == manifest['run_id']
+            and release.get('build_hash') == manifest['build_hash'] and release.get('freeze_hash') == freeze_hash
             and release.get('fixture_manifest_hash') == manifest['fixture_manifest_hash']
             and release.get('seal') == manifest['fixture_seal']
             and release.get('candidate_hash') == manifest['code_hash']
@@ -84,7 +85,9 @@ def validate_gates(manifest: dict, plan: dict, fixtures: dict, freeze: dict | No
             raise ValueError('heldout dimension overlap/missing comparison; canonical split audit refused')
         if len({r["wording_family"] for r in selected}) < 8 or len({r["speaker"] for r in selected}) < 2:
             raise ValueError("heldout family/speaker coverage incomplete")
-        # Authenticate/redeem only after structural binding/split checks, before audio exposure.
+        # A guarded private reader has already durably accounted actual external
+        # redemption before even manifest/split reads. Acknowledge that same use;
+        # do not redeem a second time through this structural gate.
         if not verify_release(release):
             raise ValueError('independent custody release authentication/redemption refused')
         independent_release = True
