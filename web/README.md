@@ -1,0 +1,11 @@
+# Browser workbench
+
+Dirty Mode source construction; runtime unverified. No dependency resolution, typecheck, build, microphone trial, browser calibration or joined relay session has run.
+
+After runtime activation is authorized, install the pinned web dependencies, claim/check a local port using agent-ports, set `VOICELAB_WEB_PORT` to that registered port, and use `npm run dev`. Vite binds `127.0.0.1`, refuses port fallback and has no remote proxy. Enter the separately registered relay WebSocket URL and its operator-provided nonce in the UI. The relay's configured allowed origin must match this frontend origin. No nonce is persisted or included in trace export.
+
+Scripts: `npm run typecheck` (also `npm run check`) is TypeScript no-emit; `npm run build` is no-emit then Vite build; `npm run dev` starts Vite. These are later activation instructions, not executed checks.
+
+The browser consumes protocol v1 server envelopes with nested `payload`. Capture and output use actual AudioContext rates, streaming linear interpolation to/from 24 kHz mono PCM16, and actual worklet block lengths. This interpolation is a provisional resampler: anti-alias filtering, conversion delay/impulse accuracy and device behavior require validation before evaluation. Two seconds is the maximum output queue; upload WebSocket buffering is capped. Worklet fences reject old connection/response epochs; rendered ACKs originate after samples enter the render graph. These are not acoustic receipt guarantees.
+
+The local energy endpoint is provisional (−45 dBFS per actual capture block, 20 ms continuously sustained, 600 ms hangover; not yet the proposed fixed 10 ms RMS window), with explicit silence failure. During playback the microphone monitors sustained energy onset and applies the worklet fence before admitting interrupting audio. Explicit Interrupt/Retry also admits a next turn. Capture pauses on response completion until user action. Acoustic barge-in and false-noise behavior are implemented in source but remain unverified. Task deadline is 120 seconds, max eight turns. Permission loss/mute/transport errors release capture and require explicit action. Reload abandons the session. Typed mock stimulus bypasses speech and synthetic tone cannot pass spoken correctness. Latencies, costs and task acceptance remain unknown until real evidence arrives.
