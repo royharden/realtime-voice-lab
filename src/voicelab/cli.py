@@ -24,8 +24,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     serve.add_argument("--allowed-origin", help="Exact registered loopback browser origin")
     serve.add_argument("--mock-fault-policy", type=Path, help="Explicit operator mock-only policy JSON")
     delegates = {
+        "trial-plan": ("voicelab.evaluation.cli", "plan"),
         "run": ("voicelab.evaluation.cli", "run"),
         "eval": ("voicelab.evaluation.cli", "report"),
+        "assemble": ("voicelab.evaluation.cli", "assemble"),
+        "review-packet": ("voicelab.evaluation.cli", "review-packet"),
+        "review-append": ("voicelab.evaluation.cli", "review-append"),
+        "review-export": ("voicelab.evaluation.cli", "review-export"),
+        "custody-import": ("voicelab.evaluation.cli", "custody-import"),
+        "reproduce": ("voicelab.evaluation.cli", "reproduce"),
         "calibrate": ("voicelab.harness.cli", "calibrate"),
         "soak": ("voicelab.harness.cli", "soak"),
         "audit-split": ("voicelab.harness.cli", "audit-split"),
