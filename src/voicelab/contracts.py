@@ -206,6 +206,21 @@ class TurnResult(Model):
     timing_domain: Literal["browser_performance_ms", "server_monotonic_ns", "unknown"] = "unknown"
 
 
+class ScheduledTurn(Model):
+    """Prespecified membership survives missing terminal rows; refs are separate evidence."""
+    logical_turn_id: Identifier
+    trial_id: Identifier
+    arm: Literal["V", "C", "K"]
+    cohort: Literal["clean", "fault", "diagnostic"]
+    network_profile: Annotated[str, Field(min_length=1, max_length=500)]
+    model_version: Annotated[str, Field(min_length=1, max_length=500)]
+    task_id: Identifier | None = None
+    family: str | None = None
+    pair_id: Identifier | None = None
+    admission: Literal["scheduled", "started", "refused", "not_started", "unknown"] = "unknown"
+    admission_evidence_reference: Annotated[str | None, Field(min_length=1, max_length=500)] = None
+
+
 class RunManifest(Model):
     schema_version: Literal[1] = 1
     run_id: Identifier
@@ -239,6 +254,9 @@ class RunManifest(Model):
     evidence_label: str
     created_at: str
     scheduled_turns: list[Identifier]
+    # Legacy manifests parse, but incomplete assignment/start evidence cannot support
+    # a complete all-started cohort headline. Reporting owns exact-set reconciliation.
+    turn_assignments: list[ScheduledTurn] = Field(default_factory=list)
     scheduled_tasks: list[Identifier] = Field(default_factory=list)
     bootstrap_seed: int = 0
 

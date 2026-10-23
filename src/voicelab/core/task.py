@@ -23,7 +23,8 @@ class TaskAuthority:
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS task_trials(
           namespace TEXT PRIMARY KEY, state TEXT NOT NULL, version INTEGER NOT NULL,
-          slot_id TEXT, challenge TEXT, epoch INTEGER NOT NULL DEFAULT 0);
+          slot_id TEXT, challenge TEXT, epoch INTEGER NOT NULL DEFAULT 0,
+          selection_turn TEXT);
         CREATE TABLE IF NOT EXISTS task_operations(
           namespace TEXT NOT NULL, operation_id TEXT NOT NULL, turn_id TEXT NOT NULL,
           command TEXT NOT NULL, arguments TEXT NOT NULL, outcome TEXT NOT NULL,
@@ -37,6 +38,17 @@ class TaskAuthority:
           operation_id TEXT NOT NULL, turn_id TEXT NOT NULL, command TEXT NOT NULL,
           epoch INTEGER NOT NULL, duplicate INTEGER NOT NULL, outcome TEXT NOT NULL);
         """)
+        # Existing journals keep their effects/outcomes. Legacy unconfirmed selections
+        # have unknown provenance and need a fresh logical selection turn first.
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(task_trials)")}
+            if "selection_turn" not in columns:
+                self.db.execute("ALTER TABLE task_trials ADD COLUMN selection_turn TEXT")
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
 
     def close(self) -> None:
         self.db.close()
@@ -107,9 +119,9 @@ class TaskAuthority:
             elif row["state"] == "information" or args.get("slot_id") not in {s["id"] for s in SLOTS}:
                 result.update(ok=False, code="select_offered_slot", slots=list(SLOTS))
             else:
-                self.db.execute("UPDATE task_trials SET state='awaiting_confirmation',version=version+1,slot_id=?,challenge=? WHERE namespace=?", (args["slot_id"], secrets.token_urlsafe(24), ns))
+                self.db.execute("UPDATE task_trials SET state='awaiting_confirmation',version=version+1,slot_id=?,challenge=?,selection_turn=? WHERE namespace=?", (args["slot_id"], secrets.token_urlsafe(24), turn, ns))
         elif command == "confirm_slot":
-            if row["state"] != "awaiting_confirmation" or not confirmed or args.get("slot_id") != row["slot_id"] or args.get("challenge") != row["challenge"] or type(args.get("state_version")) is not int or args.get("state_version") != row["version"]:
+            if row["state"] != "awaiting_confirmation" or confirmed is not True or not row["selection_turn"] or turn == row["selection_turn"] or args.get("slot_id") != row["slot_id"] or args.get("challenge") != row["challenge"] or type(args.get("state_version")) is not int or args.get("state_version") != row["version"]:
                 result.update(ok=False, code="explicit_current_confirmation_required")
             else:
                 self.db.execute("INSERT INTO task_bookings VALUES(?,?,?,?,?,?)", (ns, operation, row["slot_id"], turn, epoch, row["version"]))
