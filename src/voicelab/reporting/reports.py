@@ -10,7 +10,16 @@ from pathlib import Path
 from voicelab.contracts import RunManifest, TurnResult
 from .timing import stage_rows
 
-REPORT_GENERATOR_VERSION = 1
+REPORT_GENERATOR_VERSION = 2
+K_LOCAL_CONTROL = ('canned', 'local-control-zero-v1')
+K_ROW_REASON = 'licensed fixed control: task not applicable; spoken correctness unknown'
+K_QUALIFICATION = ('licensed fixed PCM control: control_complete is a receipt/render control, not task, spoken or booking '
+                   'success; task not applicable, spoken correctness unknown, model stages not applicable')
+
+
+def _licensed(row: dict, mode: str) -> bool:
+    """Only live K is the licensed fixed control; mock K keeps synthetic mock semantics."""
+    return row.get('arm') == 'K' and mode == 'live'
 REPORT_OUTPUT_FILES = ('results.json', 'results.md', 'results.jsonl', 'ledger-summary.md',
                        'failures.json', 'numeric-fragments.json', 'README-results.md', 'LIMITATIONS-results.md')
 
@@ -196,6 +205,9 @@ def task_analysis(manifest: dict, rows: list[dict], task_admissions: list[dict])
         terminal_rows = [r for r in children if r.get('task_terminal') == terminal]
         if terminal == 'success' and not any(r.get('task_correct') is True and r.get('spoken_correct') is True for r in terminal_rows):
             terminal = 'unknown'
+        control = bool(children) and all(_licensed(r, manifest['mode']) for r in children)
+        if control:
+            terminal = 'not_applicable'
         memberships = {(r.get('arm'), r.get('cohort'), r.get('network_profile'), r.get('model_version')) for r in children}
         membership = next(iter(memberships)) if len(memberships) == 1 else ('unknown',) * 4
         admission_record = admission_by_task.get(task)
@@ -211,12 +223,17 @@ def task_analysis(manifest: dict, rows: list[dict], task_admissions: list[dict])
                         'admission_conflict': conflict,
                         'refused': not started and (admission == 'refused' or bool(children) and all(r.get('admission') == 'refused' for r in children)),
                         'identity': dict(zip(('arm', 'cohort', 'network_profile', 'model_version'), membership)),
-                        'outcome': terminal, 'reason': None if terminal != 'unknown' else 'missing/conflicting/unqualified task terminal'})
+                        # Every scheduled K turn must have started and completed; censored turns are not complete.
+                        'control_complete': all(r.get('admission') == 'started' and r.get('outcome') == 'control_complete'
+                                                for r in children) if control else None,
+                        'outcome': terminal, 'reason': (K_QUALIFICATION if control else
+                            None if terminal != 'unknown' else 'missing/conflicting/unqualified task terminal')})
     cohorts = {}
     for row in results:
         key = tuple(str(row['identity'][k]) for k in ('arm', 'cohort', 'network_profile', 'model_version'))
         bucket = cohorts.setdefault(key, {'identity': row['identity'], 'scheduled': 0, 'started': 0, 'successful': 0,
-                                          'admitted': 0, 'admission_unknown': 0, 'refused': 0, 'unknown': 0})
+                                          'admitted': 0, 'admission_unknown': 0, 'refused': 0, 'unknown': 0,
+                                          'not_applicable': 0, 'control_complete': 0})
         bucket['scheduled'] += 1
         bucket['started'] += int(row['started'])
         bucket['admitted'] += int(row['admitted'])
@@ -224,6 +241,8 @@ def task_analysis(manifest: dict, rows: list[dict], task_admissions: list[dict])
         bucket['successful'] += int(row['outcome'] == 'success')
         bucket['refused'] += int(row['refused'])
         bucket['unknown'] += int(row['outcome'] == 'unknown')
+        bucket['not_applicable'] += int(row['outcome'] == 'not_applicable')
+        bucket['control_complete'] += int(row['control_complete'] is True)
     return {'scheduled': len(results), 'started': sum(r['started'] for r in results),
             'admitted': sum(r['admitted'] for r in results),
             'admission_unknown': sum(r['admission_unknown'] for r in results),
@@ -249,6 +268,8 @@ def cost_analysis(ledger: dict, manifest: dict) -> dict:
         if key[-1] != 'USD':
             raise ValueError('mixed/unsupported currency; no implicit exchange rate')
         bucket = components.setdefault(key, {'attempts': 0, 'known': Decimal(0), 'exposure': Decimal(0), 'unknown': 0})
+        if key[0] == 'K' and manifest['mode'] == 'live' and (key[1], key[2]) != K_LOCAL_CONTROL:
+            raise ValueError('K attempt outside typed no-provider local-control terms')
         bucket['attempts'] += 1
         if attempt['state'] == 'settled':
             amount = Decimal(str(attempt['settled']))
@@ -275,13 +296,20 @@ def cost_analysis(ledger: dict, manifest: dict) -> dict:
         rates[metric] = {'denominator_seconds': str(denominator) if denominator is not None else None,
                          'known_cost_per_minute': str(known * 60 / denominator) if denominator else None,
                          'complete': complete, 'reason': None if denominator else 'undefined denominator'}
+    control_attempts = manifest['mode'] == 'live' and any(str(attempt['arm']) == 'K' for attempt in attempts)
+    scope = ['ledger attempts only: totals come from the canonical saved whole-run ledger, never session projections']
+    if control_attempts:
+        scope.append('K known zero covers only the no-provider-generation component (canned/local-control-zero-v1); '
+                     'license, local compute, study and other costs are unknown and excluded')
     return {'known_cost': str(known), 'unknown_count': ledger.get('unknown_count'),
+            'cost_scope': scope, 'other_costs': 'unknown' if control_attempts else None,
             'unknown_exposure': str(exposure), 'complete': complete,
             'estimated_components': ledger.get('estimated_components', []), 'rates': rates,
             'attempt_count': len(attempts),
             'components': [{'arm': key[0], 'component': key[1], 'price_version': key[2], 'currency': key[3],
                             'attempt_count': value['attempts'], 'known_cost': str(value['known']),
-                            'unknown_exposure': str(value['exposure']), 'unknown_count': value['unknown']}
+                            'unknown_exposure': str(value['exposure']), 'unknown_count': value['unknown'],
+                            'cost_scope': 'no_provider_generation_component_only' if control_attempts and key[0] == 'K' else 'ledger_component'}
                            for key, value in sorted(components.items())],
             'affordability_winner': None}
 
@@ -312,17 +340,22 @@ def _stage_analysis(rows):
             'english_translation': 'identity no-op; no duration'}
 
 
-def _failures(rows, tasks, costs, cohorts):
+def _failures(rows, tasks, costs, cohorts, mode):
     failures = []
     for row in rows:
         reasons = list(row.get('denominator_uncertainty', []))
-        if row.get('admission') == 'started' and row.get('outcome') != 'success':
+        control = _licensed(row, mode)
+        if row.get('admission') == 'started' and row.get('outcome') != ('control_complete' if control else 'success'):
             reasons.append('started turn terminal: ' + str(row.get('outcome', 'unknown')))
         if row.get('admission') == 'refused':
             reasons.append('admission refused; excluded from started response denominator')
         if row.get('unknown_reason') and row.get('admission') != 'not_started':
-            reasons.append(row['unknown_reason'])
-        if row.get('admission') == 'started' and (row.get('spoken_correct') is not True or row.get('task_correct') is not True):
+            # The fixed K qualification is reported once per cohort, not as a per-turn failure.
+            extra = [part for part in row['unknown_reason'].split('; ')
+                     if not (control and part in K_ROW_REASON.split('; '))]
+            if extra:
+                reasons.append('; '.join(extra))
+        if not control and row.get('admission') == 'started' and (row.get('spoken_correct') is not True or row.get('task_correct') is not True):
             reasons.append('acceptable spoken/task correctness not established')
         for stage in stage_rows(row):
             if stage['reason'] and 'no-op' not in stage['reason']:
@@ -332,7 +365,11 @@ def _failures(rows, tasks, costs, cohorts):
     for task in tasks.get('rows', []):
         if task.get('admission_conflict'):
             failures.append({'scope': 'task', 'id': task['task_id'], 'reason': 'task refusal conflicts with observed logical start'})
-        if task['outcome'] != 'success':
+        if task['outcome'] == 'not_applicable':
+            if task.get('control_complete') is not True:
+                failures.append({'scope': 'task', 'id': task['task_id'],
+                                 'reason': 'licensed control not completed for every scheduled turn, or refused; bounded failure/abandonment retained'})
+        elif task['outcome'] != 'success':
             failures.append({'scope': 'task', 'id': task['task_id'], 'reason': task['reason'] or task['outcome']})
     if not costs['complete']:
         failures.append({'scope': 'cost', 'id': 'all-attempts', 'reason': 'unknown liability; complete cost/affordability claim withheld'})
@@ -393,6 +430,16 @@ def build_report(manifest: dict, rows: list[dict], ledger: dict, *, task_admissi
         receipt_values = [_latency(r, 'receipt_latency_ms', qualified=True) for r in clean]
         receipt_headline = (_withheld_distribution(receipt_values, denominator_reasons) if denominator_reasons
                             else _distribution(receipt_values))
+        if key[0] == 'live' and key[1] == 'K':
+            # A control has no acceptable-response latency; never a floor or winner entry.
+            for metric in ('receipt_latency_ms', 'render_latency_ms'):
+                conditional[metric]['qualification'] = raw_latency[metric]['qualification'] = (
+                    'descriptive control render/receipt onset only; ' + K_QUALIFICATION)
+                qualified_conditional[metric] = {'n': len(started), 'value_ms': None, 'qualification':
+                    'not applicable: no qualified task/spoken response exists for a licensed fixed control'}
+            headline = receipt_headline = {name: {'n': len(clean), 'rank': None, 'value_ms': None,
+                'label': 'not applicable: licensed fixed control', 'complete': False, 'reasons': [K_QUALIFICATION]}
+                for name in ('p50', 'p95')}
         cohorts.append({'identity': dict(zip(('mode', 'arm', 'network_profile', 'model_version', 'cohort'), key)),
             'scheduled': len(group), 'started': len(started),
             'refused': sum(r.get('admission') == 'refused' for r in group),
@@ -412,7 +459,9 @@ def build_report(manifest: dict, rows: list[dict], ledger: dict, *, task_admissi
             'denominator_incompleteness_reasons': sorted(set(denominator_reasons)),
             'all_started_clean_acceptable_render': headline,
             'all_started_clean_acceptable_receipt': receipt_headline,
-            'task_results': 'reported separately; turn success is not task success'})
+            'task_results': 'reported separately; turn success is not task success',
+            'control_complete': outcomes.get('control_complete', 0) if key[:2] == ('live', 'K') else None,
+            'qualification': K_QUALIFICATION if key[:2] == ('live', 'K') else None})
     tasks = task_analysis(manifest, retained, task_admissions or [])
     costs = cost_analysis(ledger, manifest)
     successes = tasks.get('successful', 0)
@@ -424,10 +473,71 @@ def build_report(manifest: dict, rows: list[dict], ledger: dict, *, task_admissi
             'denominator_incompleteness_reasons': sorted(set(global_reasons + [
                 reason for row in retained for reason in row['denominator_uncertainty']])),
             'ledger': ledger, 'costs': costs, 'tasks': tasks,
-            'failed_items': _failures(retained, tasks, costs, cohorts),
+            'failed_items': _failures(retained, tasks, costs, cohorts, manifest['mode']),
             'paired': paired_analysis(retained, manifest.get('bootstrap_seed', 0), manifest['mode']), 'winner': None,
             'limitations': ['No architecture causal claim', 'Unknown spoken correctness is nonattainment',
-                            'Calibration/audio custody and independent acceptance require separate evidence']}
+                            'Calibration/audio custody and independent acceptance require separate evidence']
+                           + ([K_QUALIFICATION] if any(_licensed(r, manifest['mode']) for r in retained) else [])}
+
+
+def _generated_limitations(report: dict, manifest: dict, driver: dict) -> dict:
+    """Honest statements from saved admission/lineage/calibration metadata; nothing becomes verified here."""
+    statements, failed = [], []
+    evidence = {item['task_id']: item for item in driver.get('admission_evidence', [])}
+    for admitted in driver.get('task_admissions', []):
+        task = admitted['task_id']
+        if manifest.get('mode') == 'live' and task not in evidence:
+            failed.append(('admission', task, 'opened identity fingerprint not observed; requested/returned identity unknown'))
+    for task, item in sorted(evidence.items()):
+        if item['observation'] != 'observed':
+            failed.append(('admission', task, item['reason']))
+            continue
+        for issue in item['issues']:
+            failed.append(('admission', task, issue))
+        statements.extend(task + ': ' + note for note in item.get('notes', []))
+        control = item['licensed_control']
+        if control is not None:
+            statements.append(f"{task}: K approval {control['approval_observation']}, asset observation "
+                              f"{control.get('asset_observation') or 'unknown'}; authorization/capability references "
+                              'are operator attestations; rights, verifier and independent verification remain unknown')
+    if evidence:
+        statements.append('Admission fingerprints record requested versus returned identities as observed by the driver; '
+                          'independent verification is unknown for every arm')
+    lineage = report.get('ledger', {}).get('attempt_lineage')
+    resolution = {}
+    if lineage is None:
+        statements.append('Ledger predates reservation-time lineage; attempt-to-session joins are unknown')
+    else:
+        resolution = {row['attempt_id']: row.get('lineage_resolution') for row in report['ledger'].get('attempts', [])}
+        unknown = lineage['unknown_attempt_ids']
+        planned = sum(resolution.get(attempt) == 'plan_identity' for attempt in unknown)
+        joined = len(unknown) - planned
+        if planned:
+            statements.append(f'{planned} attempts lack reservation-time lineage and are attributed only by their '
+                              'unchanged prespecified plan turn ID; no session join is claimed')
+        if joined:
+            statements.append(f'{joined} attempts lack reservation-time lineage and are joined only by exact driver/trace '
+                              'attempt correlation; all remain in totals')
+    conflicts = {attempt for attempt, value in resolution.items() if value == 'unresolved_conflict'}
+    for attempt in sorted(conflicts):
+        failed.append(('lineage', attempt, 'exact reservation lineage conflicts with plan identity; session join unresolved'))
+    for item in driver.get('attempt_lineage_unresolved', []):
+        if item not in conflicts:
+            failed.append(('lineage', item, 'saved-snapshot attempt lineage unresolved; no inferred join'))
+    statements.append('Totals come only from the canonical saved whole-run ledger; session_attempts projections are never summed')
+    for session in driver.get('auxiliary_sessions', []):
+        identity = str(session['task_id'])
+        if not session['scheduled']:
+            failed.append(('calibration', identity, 'auxiliary calibration-control session lacks scheduling record'))
+        for reason in session['evidence_unknown']:
+            failed.append(('calibration', identity, 'auxiliary calibration evidence unknown: ' + reason))
+        statements.append(identity + ': ' + session['qualification'])
+    if manifest.get('calibration_hash') is None:
+        statements.append('No calibration artifact pinned by the run manifest; render-latency gates stay unestablished')
+    if driver.get('wire_audio_rollups'):
+        statements.append(f"{len(driver['wire_audio_rollups'])} wire audio rollups are metadata counts/hashes only; "
+                          'not acoustic, correctness or control-pass evidence')
+    return {'statements': sorted(set(statements)), 'failed_items': sorted(set(failed))}
 
 
 def write_report(manifest_path: str | Path, rows_path: str | Path, ledger_path: str | Path,
@@ -448,15 +558,23 @@ def write_report(manifest_path: str | Path, rows_path: str | Path, ledger_path: 
         report['input_sha256']['driver_correlations'] = hashlib.sha256(driver_raw).hexdigest()
         report['driver_correlations'] = driver_data
         observed_terminals = []
+        arms = {row['logical_turn_id']: row.get('arm') for row in manifest.get('turn_assignments', [])}
         for turn, records in sorted(driver_data.get('transport_attempts', {}).items()):
+            expected = 'control_complete' if _licensed({'arm': arms.get(turn)}, manifest.get('mode')) else 'success'
             for record in records:
                 if record['kind'] == 'turn_ended':
                     observed_terminals.append({'logical_turn_id': turn, **record})
-                    if record.get('terminal_outcome') != 'success':
+                    if record.get('terminal_outcome') != expected:
                         report['failed_items'].append({'scope': 'transport_attempt',
                             'id': turn + ' / ' + str(record.get('observed_transport_turn_id')),
                             'reason': str(record.get('terminal_outcome', 'unknown')) + '; retained even if later recovery succeeds'})
         report['transport_attempt_terminals'] = observed_terminals
+        report['admission_evidence'] = driver_data.get('admission_evidence', [])
+        report['auxiliary_sessions'] = driver_data.get('auxiliary_sessions', [])
+        report['wire_audio_rollups'] = driver_data.get('wire_audio_rollups', [])
+        report['generated_limitations'] = _generated_limitations(report, manifest, driver_data)
+        for scope, identity, reason in report['generated_limitations']['failed_items']:
+            report['failed_items'].append({'scope': scope, 'id': identity, 'reason': reason})
         report['failed_items'].sort(key=lambda item: (item['scope'], item['id'], item['reason']))
     if evidence_path is not None:
         evidence_raw = Path(evidence_path).read_bytes()
@@ -520,7 +638,10 @@ def write_report(manifest_path: str | Path, rows_path: str | Path, ledger_path: 
                                    sort_keys=True, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     numeric = {'run_id': report['run_id'], 'created_at': report['created_at'], 'input_sha256': report['input_sha256'],
                'evidence_status': report['evidence_status'], 'cohorts': report['cohorts'], 'tasks': report['tasks'],
-               'costs': report['costs'], 'paired': report['paired'], 'winner': None}
+               'costs': report['costs'], 'paired': report['paired'], 'winner': None,
+               'report_generator_version': REPORT_GENERATOR_VERSION,
+               'attempt_lineage': report['ledger'].get('attempt_lineage'),
+               'generated_limitations': report.get('generated_limitations', {}).get('statements', [])}
     fragments = destination / 'numeric-fragments.json'
     fragments.write_text(json.dumps(numeric, sort_keys=True, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     readme = destination / 'README-results.md'
@@ -532,6 +653,9 @@ def write_report(manifest_path: str | Path, rows_path: str | Path, ledger_path: 
                       + ('\n'.join('- ' + item['scope'] + ' / ' + item['id'] + ': ' + item['reason'].replace('\n', ' ')
                                    for item in report['failed_items']) if report['failed_items'] else
                          'No failed items in the supplied analysis; this does not establish independent acceptance.')
+                      + '\n\n## Generated limitations\n\n'
+                      + '\n'.join('- ' + item.replace('\n', ' ') for item in
+                                  report['limitations'] + report.get('generated_limitations', {}).get('statements', []))
                       + '\n\nExact inputs: `' + json.dumps(report['input_sha256'], sort_keys=True) + '`\n', encoding='utf-8')
     written = [structured, summary, raw_rows, cost, failures, fragments, readme, limits]
     if tuple(path.name for path in written) != REPORT_OUTPUT_FILES:
