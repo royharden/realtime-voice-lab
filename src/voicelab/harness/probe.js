@@ -8,6 +8,7 @@
   let staleDiscards = 0;
   let cancelAcks = 0, resumeCount = 0, resumePending = null, lastClose = null;
   let observedSession = null;
+  let commitCount=0,lastCommit=null,lastCompletion=null;
   const canceledEpochs = new Set();
   const NativeSocket = window.WebSocket, NativeNode = window.AudioWorkletNode;
   const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -35,7 +36,10 @@
             observedSession=value.session_id;canceledEpochs.clear();lastAudio=null;resumePending=null;lastClose=null;prune();
           }
           if(value.type === 'audio') lastAudio = value;
-          if(value.type === 'event' && value.payload?.kind === 'response_done') responseDone++;
+          if(value.type === 'event' && value.payload?.kind === 'response_done') {
+            responseDone++;lastCompletion={session_id:value.session_id,turn_id:value.payload.turn_id,
+              response_id:value.payload.response_id,connection_epoch:value.connection_epoch,response_epoch:value.response_epoch};
+          }
           if(value.type==='state' && Number.isSafeInteger(value.payload?.fence_epoch) &&
               !canceledEpochs.has(value.payload.fence_epoch)) {
             canceledEpochs.add(value.payload.fence_epoch);cancelAcks++;
@@ -54,6 +58,8 @@
       let value; try { value = JSON.parse(raw); } catch { return super.send(raw); }
       if (dropAck && value.type === 'rendered') { injected++; return; }
       if(value.type==='resume')resumePending=value.connection_epoch;
+      if(value.type==='commit') {commitCount++;lastCommit={session_id:observedSession,turn_id:value.turn_id,
+        connection_epoch:value.connection_epoch,response_epoch:value.response_epoch};}
       return super.send(raw);
     }
   };
@@ -76,6 +82,7 @@
       if('cancelAfterCommit' in options)cancelAfterCommit=options.cancelAfterCommit===true;
     },
     snapshot() { prune();return {injected,responseDone,cancelTriggered,fenceCounter,lastFence,cancelAcks,resumeCount,lastClose,staleDiscards,
+      commitCount,lastCommit,lastCompletion,
       liveTracks:[...tracks].filter(t=>t.readyState==='live').length,
       openSockets:[...sockets].filter(s=>s.readyState<2).length,
       instrumentation:'driver-owned media/socket observations; app timer/worklet cleanup requires D6 snapshot'}; },

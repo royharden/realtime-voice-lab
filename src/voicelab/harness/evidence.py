@@ -16,24 +16,39 @@ def canonical(value: object) -> bytes:
 class EvidenceSink:
     def __init__(self, root: Path, spec: dict):
         # Never mix a previous run's observations or silently overwrite artifacts.
-        root.mkdir(parents=True, exist_ok=False)
+        if root.exists():
+            # An operator may precreate an empty directory to bind its real inode
+            # in D5's signed allowed_output_root_bindings before this invocation.
+            from voicelab.evaluation.exposure import require_output_root
+            require_output_root(spec.get('_output_reader'), root)
+            if not root.is_dir() or root.is_symlink() or any(root.iterdir()):
+                raise ValueError('only_authenticated_precreated_empty_output_root_allowed')
+        else:
+            root.mkdir(parents=True, exist_ok=False)
         self.root, self.run_id = root, spec['run_id']
+        self.mode = spec.get('mode') if spec.get('mode') in {'mock', 'live', 'replay'} else 'unknown'
         self.handle = (root / 'driver.jsonl').open('xb')
         self.sequence = 0
         self.spec_hash = spec['_manifest_hash']
         self.counts: dict[str, int] = {}
         self.closed = False
+        self.capacity_exhausted = False
         self.authoritative_references: dict[tuple[str, str], dict] = {}
 
     def emit(self, kind: str, *, observation: str = 'observed', **fields: object) -> None:
-        if self.closed or self.sequence >= (100_000 if kind == 'driver_ended' else 99_999):
+        critical = kind in {'driver_ended', 'task_admission', 'turn_not_started', 'cohort_obligation',
+                           'cohort_cleanup_observed', 'task_driver_ended', 'cleanup_unknown'}
+        if self.closed or self.sequence >= (100_000 if critical else 95_000):
+            self.capacity_exhausted = True
             raise ValueError('driver evidence closed or bounded event capacity exhausted')
         if observation not in {'observed', 'estimated', 'unknown'}:
             raise ValueError('invalid observation status')
+        if 'mode' in fields and fields['mode'] != self.mode:
+            raise ValueError('evidence mode cannot change inside a frozen run')
         row = {'schema_version': 1, 'kind': kind, 'run_id': self.run_id,
                'sequence': self.sequence, 'timestamp': time.monotonic_ns(),
                'clock_domain': 'driver_monotonic_ns', 'observation': observation,
-               'mode': 'mock', 'split': 'dev', **fields}
+               'mode': self.mode, 'split': 'dev', **fields}
         self.handle.write(canonical(observed_metadata(row)))
         self.handle.flush()
         self.sequence += 1
@@ -78,7 +93,8 @@ class EvidenceSink:
         raw = (self.root / 'driver.jsonl').read_bytes()
         self.artifact('handoff.json', {
             'schema_version': 1, 'run_id': self.run_id, 'manifest_hash': self.spec_hash,
-            'evidence_label': 'development mock observations; no independent acceptance',
+            'mode': self.mode,
+            'evidence_label': f'development {self.mode} prospective/observed records; no independent acceptance',
             'driver_completed': completed, 'counts': self.counts,
             'references': {'driver': {'path': 'driver.jsonl', 'kind': 'driver_observations',
                            'sha256': hashlib.sha256(raw).hexdigest()}, **(references or {})},

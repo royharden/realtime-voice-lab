@@ -168,6 +168,8 @@ async def perform_fault(page, kind: str, *, server_control=None):
 
 async def run_journeys(spec: dict, nonce: str, sink, *, plan: dict | None = None,
                        server_control=None) -> dict:
+    from voicelab.evaluation.exposure import validate_read_access
+    validate_read_access(spec.get('_artifact_reader'))
     tasks = tasks_from(spec, plan)
     references, incomplete = {}, []
     for task in tasks:

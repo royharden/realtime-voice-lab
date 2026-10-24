@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
+import re
 
-from .browser import BrowserDriver
+from .browser import BrowserDriver, server_evidence, collect_relay_trace, collect_ledger_snapshot, own_diagnostic
 from .journey import wait_state
 from .observations import DiagnosticCursor, app_snapshot, wait_cleanup
 
@@ -88,11 +90,76 @@ def gap_row(raw: dict, index: int) -> tuple[dict, dict]:
     return row, controls
 
 
-async def calibrate_page(page, sink, identity: str, phase: str) -> dict:
+async def calibrate_page(page, sink, identity: str, phase: str, *, spec=None, nonce=None, task=None) -> dict:
+    initial = await app_snapshot(page)
+    if initial['state'] != 'awaiting_response':
+        return await _calibrate_page(page, sink, identity, phase)
+    result = {'phase': phase, 'rows': [], 'raw_anchors': [], 'controls': {},
+              'failures': [], 'required_repeats': 30, 'capture_return_state': 'awaiting_response',
+              'full_gate_complete': False, 'full_gate_pass': False, 'product_acceptance': False}
+    session = (task or {}).get('_session_id')
+    if spec is None or nonce is None or not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,96}', session):
+        result['failures'].append('paused_calibration_phase_protocol_unavailable')
+        return result
+    if (initial.get('active_probe') is not None or initial.get('queue_seconds', {}).get('playback') != 0
+            or initial.get('worklet', {}).get('status') != 'observed'
+            or initial.get('worklet', {}).get('queued_frames') != 0):
+        result['failures'].append('paused_calibration_drained_graph_unobserved')
+        return result
+    phase_id = f'calibration-{phase}'
+    active = False
+    begin_attempted = False
+    async def control(action):
+        from voicelab.contracts import CalibrationReceipt
+        raw = await asyncio.to_thread(own_diagnostic, spec, nonce,
+            f'/sessions/{session}/calibration', body={'phase_id': phase_id, 'action': action})
+        receipt = CalibrationReceipt.model_validate(raw).model_dump(mode='json')
+        if (receipt['session_id'] != session or receipt['run_id'] != task.get('_server_run_id')
+                or receipt['trial_id'] != task.get('_trial_namespace')
+                or receipt['boot_id'] != task.get('_boot_id') or receipt['phase_id'] != phase_id
+                or receipt['captured_turn_created'] is not False or receipt['task_deadlines_retained'] is not True
+                or receipt['absolute_cap_ms'] != 30000 or receipt['phase_limit'] != 2
+                or receipt['deadline_ns'] > receipt['session_deadline_ns']
+                or not 0 < receipt['deadline_ns'] - receipt['started_ns'] <= 30_000_000_000):
+            raise ValueError('calibration_phase_receipt_scope_or_deadline_mismatch')
+        sink.emit('calibration_phase_receipt', task_id=identity, phase=phase, receipt=receipt)
+        return receipt
+    try:
+        # D6 independently refuses undrained response/queue state at probe admission.
+        # HTTP phase does not send capture input or change transport/response epochs.
+        began = time.monotonic()
+        begin_attempted = True
+        receipt = await control('begin')
+        active = receipt['status'] == 'active'
+        if not active or receipt['duplicate']:
+            raise ValueError('original_calibration_phase_already_ended_no_renewal')
+        duration = (receipt['deadline_ns'] - receipt['started_ns']) / 1e9
+        result = await asyncio.wait_for(_calibrate_page(page, sink, identity, phase),
+            timeout=max(.001, duration - (time.monotonic() - began)))
+        result['calibration_phase_receipt'] = receipt
+    except Exception as exc:
+        result['failures'].append('phase-' + type(exc).__name__)
+        result['full_gate_complete'] = result['full_gate_pass'] = False
+    finally:
+        if begin_attempted:
+            try:
+                ended = await control('end')
+                result['calibration_phase_end'] = ended
+                if ended['status'] != 'ended':
+                    raise ValueError('calibration_phase_end_unobserved')
+            except Exception as exc:
+                result['failures'].append('phase-end-' + type(exc).__name__)
+                result['full_gate_complete'] = result['full_gate_pass'] = False
+    return result
+
+
+async def _calibrate_page(page, sink, identity: str, phase: str) -> dict:
     from voicelab.reporting.diagnostics import calibration_report
     rows, raw_anchors, controls_by_repeat, failures = [], [], [], []
     cursor = DiagnosticCursor()
-    cursor.cursor = (await app_snapshot(page))['trace_cursor']
+    initial = await app_snapshot(page)
+    paused = initial['state'] == 'awaiting_response'
+    cursor.cursor = initial['trace_cursor']
     sink.emit('calibration_phase_started', task_id=identity, phase=phase, cursor=cursor.cursor)
     for index in range(30):
         options = {'kind': 'offset' if index == 1 else 'gap', 'gap_ms': 100,
@@ -132,18 +199,25 @@ async def calibrate_page(page, sink, identity: str, phase: str) -> dict:
                         and canceled.get('cancel_origin') == 'scheduled_worklet'
                         and 0 < canceled['frame'] - canceled['last_frame'] <= started.get('quantum', 0))
         before = await page.evaluate('()=>window.__voiceLabDriver.snapshot()')
-        await page.locator('#interrupt').click()
-        await wait_state(page, ['listening'])
-        await page.wait_for_function('''(prior)=>{
-          const now=window.__voiceLabDriver.snapshot();
-          return now.fenceCounter>prior.fenceCounter && now.cancelAcks>prior.cancelAcks;
-        }''', arg=before, timeout=2000)
+        if not paused:
+            await page.locator('#interrupt').click()
+            await wait_state(page, ['listening'])
+            await page.wait_for_function('''(prior)=>{
+              const now=window.__voiceLabDriver.snapshot();
+              return now.fenceCounter>prior.fenceCounter && now.cancelAcks>prior.cancelAcks;
+            }''', arg=before, timeout=2000)
         await page.evaluate('()=>window.__voiceLabDriver.staleControl()')
         await page.wait_for_function('(prior)=>window.__voiceLabDriver.snapshot().staleDiscards>prior',
                                      arg=before.get('staleDiscards', 0), timeout=2000)
         after = await page.evaluate('()=>window.__voiceLabDriver.snapshot()')
-        fence_valid = (after['fenceCounter'] > before['fenceCounter']
-                       and after['lastFence']['epoch'] > (before.get('lastFence') or {}).get('epoch', -1))
+        if paused:
+            sample_fence = next((e for e in events if e.get('kind') == 'probe_fence_applied'), {})
+            fence_valid = cancel_valid and sample_fence.get('frame') == expected
+            if (await app_snapshot(page))['state'] != 'awaiting_response':
+                raise ValueError('post calibration must preserve paused capture without a new task turn')
+        else:
+            fence_valid = (after['fenceCounter'] > before['fenceCounter']
+                           and after['lastFence']['epoch'] > (before.get('lastFence') or {}).get('epoch', -1))
     except Exception as exc:
         cancel_valid = fence_valid = False
         after = {}
@@ -159,6 +233,8 @@ async def calibrate_page(page, sink, identity: str, phase: str) -> dict:
     analysis = calibration_report(rows)
     full = len(rows) == 30 and analysis['internal_gate_pass'] and all(controls.values()) and not failures and cursor.lost == 0
     return {'phase': phase, 'rows': rows, 'raw_anchors': raw_anchors, 'controls': controls,
+        'capture_return_state': 'awaiting_response' if paused else 'listening',
+        'fence_scope': 'fresh scheduled probe sample fence; retained session epoch unchanged' if paused else 'fresh session epoch fence and ACK',
         'cancel_control': cancellation, 'summary': analysis, 'failures': failures,
         'full_gate_complete': full, 'full_gate_pass': full, 'required_repeats': 30,
         'acoustic_uncertainty': 'unknown; output timestamp estimate and render graph only',
@@ -167,16 +243,38 @@ async def calibrate_page(page, sink, identity: str, phase: str) -> dict:
 
 async def run_calibration(spec: dict, nonce: str, sink, phase: str) -> dict:
     identity = f'calibration-{phase}'
-    task = {'task_id': identity, 'arm': 'K'}
+    task = {'task_id': identity, 'arm': 'K', 'role': 'calibration_control'}
+    sink.emit('auxiliary_session_scheduled', task_id=identity, role='calibration_control', phase=phase)
     async with BrowserDriver(spec, nonce, sink) as driver:
         page, _ = await driver.page(task)
         await page.locator('#start').click()
         await wait_state(page, ['listening'])
-        result = await calibrate_page(page, sink, identity, phase)
+        result = await calibrate_page(page, sink, identity, phase, spec=spec, nonce=nonce, task=task)
         await page.locator('#end').click()
         cleanup = await wait_cleanup(page)
+        fixture_cleanup = None
+        if spec.get('_fixture_stream') is True:
+            fixture_cleanup = await page.evaluate('()=>window.__voiceLabFixtureSource.close()')
         reference = sink.artifact(f'calibration-{phase}.json', result, 'calibration_observations')
+        references = {identity: reference}
+        evidence_complete = False
+        try:
+            evidence = await server_evidence(spec, nonce, task)
+            references[identity + '-server'] = sink.artifact(
+                identity + '-server.json', evidence, 'server_evidence')
+            references[identity + '-trace'] = sink.bytes_artifact(
+                identity + '-trace.jsonl', collect_relay_trace(spec, evidence), 'trace')
+            references[identity + '-ledger'] = sink.authoritative_artifact(
+                collect_ledger_snapshot(spec, evidence), 'ledger_snapshot')
+            evidence_complete = evidence['session'].get('terminal_outcome') is not None
+        except Exception as exc:
+            sink.emit('auxiliary_session_evidence_unknown', task_id=identity,
+                      role='calibration_control', error_type=type(exc).__name__, observation='unknown')
         cleanup_valid = cleanup.get('observation_statuses', {}).get('cleanup') == 'observed_released'
-        return {'references': {identity: reference}, 'summary': result,
-                'snapshot': cleanup, 'incomplete': [] if result['full_gate_pass'] and cleanup_valid else [identity],
+        if fixture_cleanup is not None:
+            cleanup_valid = cleanup_valid and fixture_cleanup.get('closed') is True and all(
+                v == 0 for v in fixture_cleanup['owned_handles'].values())
+        return {'references': references, 'summary': result,
+                'snapshot': cleanup, 'fixture_source': fixture_cleanup,
+                'incomplete': [] if result['full_gate_pass'] and cleanup_valid and evidence_complete else [identity],
                 'evidence_label': 'single pre/post phase; pair matching and independent acceptance not established'}

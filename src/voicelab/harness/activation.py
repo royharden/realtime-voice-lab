@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import wave
+import io
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -28,13 +29,17 @@ def owned_file(root: Path, relative: str, maximum: int = 64_000_000) -> Path:
     return path
 
 
-def load_activation(path: Path, reference: str) -> dict:
+def load_activation(path: Path, reference: str, *, allow_live: bool = False,
+                    load_default_fixture: bool = True) -> dict:
     spec = json.loads(path.read_text(encoding='utf-8'))
     if (not reference or spec.get('activation_reference') != reference
             or spec.get('runtime_authorized') is not True):
         raise ValueError('later explicit operator runtime authorization required')
-    if spec.get('mode') != 'mock' or spec.get('split') != 'dev' or not spec.get('run_id'):
-        raise ValueError('keyless mock development runs only; independent gates remain closed')
+    if any(key.startswith('_') for key in spec):
+        raise ValueError('reserved runtime bindings cannot enter through JSON')
+    if (spec.get('mode') not in ({'mock', 'live'} if allow_live else {'mock'})
+            or spec.get('split') != 'dev' or not spec.get('run_id')):
+        raise ValueError('explicit supported development mode required; independent gates remain closed')
     loopback_url(spec['frontend_url'], {'http'})
     loopback_url(spec['relay_url'], {'ws'})
     ports = {urlsplit(spec[key]).port for key in ('frontend_url', 'relay_url')}
@@ -47,7 +52,7 @@ def load_activation(path: Path, reference: str) -> dict:
                for key in ('code_hash', 'config_hash')):
         raise ValueError('operator-pinned candidate/configuration hashes required')
     root = Path(spec['fixture_root']).resolve(strict=True)
-    if spec.get('fixture_manifest'):
+    if load_default_fixture and spec.get('fixture_manifest'):
         fixture, audio = load_fixture(root, spec['fixture_manifest'])
         spec['_fixture'] = fixture
         spec['_input_wav'] = str(audio)
@@ -55,14 +60,20 @@ def load_activation(path: Path, reference: str) -> dict:
     return spec
 
 
-def load_fixture(root: Path, manifest: str) -> tuple[dict, Path]:
-    fixture = json.loads(owned_file(root, manifest).read_text(encoding='utf-8'))
+def load_fixture(root: Path, manifest: str, *, reader=None) -> tuple[dict, Path]:
+    return load_reviewed_fixture(root, manifest, reader)
+
+
+def load_reviewed_fixture(root: Path, manifest: str, reader) -> tuple[dict, Path]:
+    from .access import read_owned
+    fixture = json.loads(read_owned(reader, root, manifest, maximum=4_000_000))
     if fixture.get('split') != 'dev' or fixture.get('kind') != 'diagnostic_signal_and_typed_stimulus':
         raise ValueError('development diagnostic fixture manifest required')
     audio = owned_file(root, fixture['audio']['path'])
-    if hashlib.sha256(audio.read_bytes()).hexdigest() != fixture['audio']['sha256']:
+    raw_audio = read_owned(reader, root, fixture['audio']['path'], maximum=6_000_000)
+    if hashlib.sha256(raw_audio).hexdigest() != fixture['audio']['sha256']:
         raise ValueError('development audio hash mismatch')
-    with wave.open(str(audio), 'rb') as wav:
+    with wave.open(io.BytesIO(raw_audio), 'rb') as wav:
         if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getcomptype()) != (1, 2, 24000, 'NONE'):
             raise ValueError('development microphone requires mono PCM16 24k WAV')
         if not 1 <= wav.getnframes() <= 24000 * 120:
@@ -77,6 +88,9 @@ def load_fixture(root: Path, manifest: str) -> tuple[dict, Path]:
 
 
 def bind_task_fixture(spec: dict, task: dict, *, planned: bool) -> dict:
+    if planned and spec.get('fixture_catalog'):
+        from .catalog import bind_catalog_task
+        return bind_catalog_task(spec, task)
     if not planned:
         if not spec.get('_fixture') or not spec.get('_input_wav'):
             raise ValueError('single-fixture diagnostic mode requires reviewed default fixture')
@@ -86,7 +100,7 @@ def bind_task_fixture(spec: dict, task: dict, *, planned: bool) -> dict:
     if not isinstance(reference, str):
         raise ValueError('each planned fixture_id needs an explicit reviewed manifest; no global substitution')
     root = Path(spec['fixture_root']).resolve(strict=True)
-    fixture, audio = load_fixture(root, reference)
+    fixture, audio = load_reviewed_fixture(root, reference, spec.get('_artifact_reader'))
     if (fixture.get('fixture_id'), fixture.get('wording_family'), fixture.get('speaker')) != (
             identity, task.get('family'), task.get('speaker')):
         raise ValueError('task fixture/family/speaker provenance mismatch')

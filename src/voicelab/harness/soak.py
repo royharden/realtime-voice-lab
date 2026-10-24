@@ -134,7 +134,7 @@ async def run_soak(spec: dict, nonce: str, sink, profile: str) -> dict:
         else:
             # A two-context short run never silently substitutes for the fourth/full gate.
             summary['fourth_session_refused'] = False
-        pre = await asyncio.gather(*(calibrate_page(lane.page, sink, f'{profile}-c{index}-pre', 'pre')
+        pre = await asyncio.gather(*(calibrate_page(lane.page, sink, f'{profile}-c{index}-pre', 'pre', spec=spec, nonce=nonce, task=lane.task)
                                     for index, lane in enumerate(lanes)))
         for index, result in enumerate(pre):
             calibrations.append(result)
@@ -203,10 +203,9 @@ async def run_soak(spec: dict, nonce: str, sink, profile: str) -> dict:
                         await asyncio.sleep(max(0, tick + 1 - time.monotonic()))
                     if offset == len(indexes) - 1:
                         # Final graph is observed separately; do not claim it is the same graph as pre.
-                        if (await app_snapshot(lane.page))['state'] != 'listening':
-                            await lane.page.locator('#retry').click()
-                            await wait_state(lane.page, ['listening'])
-                        result = await calibrate_page(lane.page, sink, f'{profile}-c{index}-post', 'post')
+                        if (await app_snapshot(lane.page))['state'] not in {'listening', 'awaiting_response'}:
+                            raise ValueError('post calibration graph is not in a safe paused state')
+                        result = await calibrate_page(lane.page, sink, f'{profile}-c{index}-post', 'post', spec=spec, nonce=nonce, task=lane.task)
                         calibrations.append(result)
                         references[f'c{index}-post'] = sink.artifact(f'calibration-c{index}-post.json', result, 'calibration_observations')
                         if not result['full_gate_pass']:
