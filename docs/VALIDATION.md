@@ -16,6 +16,8 @@ A small set of pytest regression tests guards the plan's critical invariants. Th
 | `tests/adapters/test_wire_parsing.py` | The synthetic `fixtures/wire/` success, fault and transcription lines go through the real V/C parsers. Provider error text is sanitized and the rate-limit code is kept. Cancel/truncate serialize the rendered cutoff (960 samples = 40 ms). A cancelled or empty response with missing usage becomes unknown liability at the full reservation, never zero. Observed zero usage settles at zero. Malformed frames raise fixed protocol errors. | `adapters/providers.py`, `accounting/ledger.py` `settle_usage`; plan W2 |
 | `tests/security/test_local_boundary.py` | The protected evidence POST refuses a non-loopback Host (middleware), a missing or wrong Origin, a missing, wrong or malformed nonce, bodies over 32 bytes (413) and any body other than exactly `{}` (400). A valid request reaches the canonical reader and gets a fixed 404 for an unknown session. GET has the same boundary. | `server/app.py` `authorize`, `browser_session_evidence`; `security/__init__.py`; plan W4 |
 | `tests/integration/test_mock_journey.py` | One keyless V-mock five-turn journey through the real websocket relay: hours, slots, select, distinct confirmation, status. It books once, ends `success`, and the saved terminal, turns, task journal, zero-cost all-attempt ledger and session attempts are read back through the evidence POST. Provider, transport and outbound-TCP entry points stay unused, and the credential sentinel and nonce never appear in output. Fault row: a commit with a stale epoch is refused as a terminal `protocol_error` with no turn or operation, and an old-epoch tool callback is refused after the authority's fence advances. | `server/app.py` relay, `adapters/sessions.py` `MockArmSession`, `core/session.py`, `core/task.py`; plan W5/M6-05 |
+| `tests/browser/test_calibration_report.py` | Synthetic worklet anchors go through `harness/calibration.gap_row` (monotonic mapping, +100 ms injected offset rejected) and `reporting/diagnostics.calibration_report`. All 30 raw per-repeat errors are emitted. One 50 ms repeat fails the device by name even though the sample SD stays under 15 ms (rejected, not averaged in). Unobserved repeats and short runs are incomplete, never passed. No browser needed. | `harness/calibration.py`, `reporting/diagnostics.py`; plan W3 |
+| `tests/browser/test_ui_journey.py` | The real built `web/` UI in Playwright Chromium (fake media devices) against the mock relay on a claimed port. A typed mock turn completes, End releases to `closed`, and the post-End inspector reads saved metadata through the same-origin POST with unknowns preserved. The nonce never appears in the page URL, DOM, console or trace export, and no off-origin request is made. Barge-in on the booking-commit task advances the worklet fence while the booking is kept, and a stale-epoch frame is discarded without moving the fence. A UI served from a different origin (localhost vs relay 127.0.0.1) shows the visible incomplete-serving refusal, never POSTs evidence, and gets no CORS read. | `web/src/main.ts`, `web/src/session-evidence.ts`, `web/public/audio-worklet.js`; harness `probe.js`, `journey.py`, `browser.py`; plan W3 |
 
 `tests/conftest.py` holds the shared synthetic builders. `src/` is importable through `[tool.pytest.ini_options] pythonpath`.
 
@@ -23,9 +25,18 @@ A small set of pytest regression tests guards the plan's critical invariants. Th
 
 Only do this once runtime validation is authorized:
 
-1. Pin and lock dependencies (plan §3). `pyproject.toml` already declares the `test` extra (`pytest==8.3.4`), `testpaths` and `pythonpath`. The security and integration tests use `fastapi.testclient`, which also needs `httpx`. That has been requested from the integrator and is not yet declared.
+1. Pin and lock dependencies (plan §3). `pyproject.toml` already declares the `test` extra (`pytest==8.3.4`, `httpx==0.27.2` for `fastapi.testclient`), `testpaths` and `pythonpath`.
 2. `uv sync --extra test` (or the equivalent locked install), then `uv run pytest tests -q`.
-3. Record the actual results. Treat any failure as a finding against the source or the test; do not change the test to make it pass.
+3. Browser tests (later phase only; skipped by default):
+   - Install the `validation` extra.
+   - Run `playwright install chromium`.
+   - Build the UI from the same commit as the source under test: install the pinned web dependencies, then run `npm run build` in `web/`. The Vite config requires `VOICELAB_WEB_PORT`, set to a claimed port. The tests don't compare `VOICELAB_WEB_DIST` with the source, so a stale build makes the results meaningless.
+   - Claim and check one host port with agent-ports.
+   - Set `VOICELAB_TEST_PORT`, `VOICELAB_TEST_PORT_CLAIM` (the receipt path) and `VOICELAB_WEB_DIST` (`web/dist`).
+   - Run `uv run pytest tests/browser -q`.
+
+   `tests/browser/conftest.py` skips with a clear reason when any of these is missing and never chooses a port itself. It serves the built UI and the relay from one origin on the claimed port, in a test-only composition that adds static files to the relay app. The separate-origin case reuses the same port with a `localhost` page origin.
+4. Record the actual results. Treat any failure as a finding against the source or the test; do not change the test to make it pass.
 
 The integration and security tests drive the ASGI app in-process through TestClient: no port, listener or provider. They create their artifact root under pytest's `tmp_path`. The app refuses an artifact root with a symlink or junction ancestor, so run them where the temp directory has no linked ancestor.
 
