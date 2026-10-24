@@ -5,16 +5,9 @@ No fixture here holds real voices, heldout labels, prices, credentials or provid
 """
 from __future__ import annotations
 
-from pathlib import Path
-import sys
-
 import pytest
 
-# Until pyproject declares pytest pythonpath (requested from INT), import the src layout directly.
-SRC = Path(__file__).resolve().parents[1] / 'src'
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
+# src/ is importable through [tool.pytest.ini_options] pythonpath in pyproject.toml.
 ZERO_HASH = '0' * 64
 RUN_ID = 'regression-run'
 
