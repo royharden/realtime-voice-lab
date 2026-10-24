@@ -5,6 +5,7 @@ import {OwnedResources} from './resources';
 import {ClockAlignment} from './clock';
 import {mountReviewWorkbench} from './review-workbench';
 import {mountReplayInspector} from './replay-inspector';
+import {mountSessionEvidence} from './session-evidence';
 import {clientWire,serverWire,isArm} from './boundary';
 import {CONSTANTS} from './generated/contracts';
 import type {ClientMessage,Hello,ServerMessage,ClientStatus} from './generated/contracts';
@@ -21,7 +22,7 @@ app.innerHTML = `<header><a class="brand" href="#">◉ <span>VOICE LAB</span></a
 <details><summary>Mock typed stimulus · diagnostic only</summary><p>Typed input bypasses speech interpretation and cannot pass speech adjudication.</p><form id="stimulus"><input id="text" aria-label="Mock typed stimulus" placeholder="Ask opening hours or available slots"><button>Send diagnostic turn</button></form></details>
 <div class="section-head"><h3>Conversation</h3><span>Fictional service · English</span></div><div id="conversation" class="conversation"><p class="empty">Transcripts and explicit responses appear here.</p></div></section>
 <aside><section class="card"><p class="eyebrow">AUTHORITATIVE EFFECT</p><h2>Task journal</h2><pre id="task">No task event received.</pre><h3>Session outcome and evidence</h3><pre id="terminal">No terminal observation.</pre><p class="muted">An interruption does not undo a committed booking. The relay journal owns the effect.</p></section><section class="card"><p class="eyebrow">MEASUREMENT BOUNDARY</p><h2>Timing inspector</h2><dl><dt>Context sample rate</dt><dd id="rate">Unknown</dd><dt>Wire PCM</dt><dd>24,000 Hz · mono PCM16</dd><dt>Render boundary</dt><dd>Output timestamp estimate</dd><dt>Acoustic calibration</dt><dd>Unmeasured</dd><dt>Latency / p50 / p95</dt><dd>Not evaluated</dd></dl><pre id="timing">No rendered sample observed.</pre></section><section class="card"><p class="eyebrow">ALL ATTEMPTS</p><h2>Cost & completeness</h2><pre id="cost">Unknown until relay accounting arrives.</pre><p class="muted">Mock is not a live price or billing certification.</p></section></aside></div>
-<section class="card trace"><div class="section-head"><div><p class="eyebrow">BROWSER PERFORMANCE CLOCK · MILLISECONDS</p><h2>Lifecycle trace</h2></div><button id="download">Export local trace</button></div><p class="muted">Receipt, endpoint decision, commit, worklet fence and rendered ACK are separate events. Safe export retains up to 1,000 metadata events with explicit sequence gaps. No raw audio, transcripts or nonce are exported.</p><div id="trace" role="log" aria-live="off"></div></section><section id="review-workbench"></section><section id="replay-inspector"></section><footer>V / C / K compare pinned pipelines. No arm is presumed faster. Live requires separately authorized relay admission; no live execution is established.</footer></main>`;
+<section class="card trace"><div class="section-head"><div><p class="eyebrow">BROWSER PERFORMANCE CLOCK · MILLISECONDS</p><h2>Lifecycle trace</h2></div><button id="download">Export local trace</button></div><p class="muted">Receipt, endpoint decision, commit, worklet fence and rendered ACK are separate events. Safe export retains up to 1,000 metadata events with explicit sequence gaps. No raw audio, transcripts or nonce are exported.</p><div id="trace" role="log" aria-live="off"></div></section><section id="session-evidence"></section><section id="review-workbench"></section><section id="replay-inspector"></section><footer>V / C / K compare pinned pipelines. No arm is presumed faster. Live requires separately authorized relay admission; no live execution is established.</footer></main>`;
 const el = <T extends HTMLElement = HTMLElement>(id:string) => document.getElementById(id) as T;
 let mode:'mock'|'live'='mock';
 let replayRefresh:()=>void=()=>{};
@@ -122,6 +123,7 @@ function fail(code:string,message:string){
   setState(named.includes(code as State)?code as State:'failed',message);
 }
 function end(){
+  sessionEvidence.markEnd('local_end_requested');
   reviewWorkbench.stopPlayback();++token;setState('ending','Releasing resources. A pending permission prompt must resolve before cleanup can finish.');
   el('terminal').textContent=JSON.stringify({observation:'local_browser',outcome:'abandoned',relay_receipt:'unknown'},null,2);reportClient('abandoned');if(!admitted&&socket?.readyState===WebSocket.OPEN)try{send({type:'end'});}catch{trace('end_send_failure');}
   fence();retainedSession=undefined;awaitingResume=false;releaseAudio();resourcesChanged();
@@ -158,12 +160,14 @@ function interrupt(){
   pendingCancel={responseId,epoch:epoch+1,minimumCutoff:cancelAck&&cancelAck.response_id===responseId?cancelAck.rendered_through_sample:0};fence();fenceTimer=resources!.timer(()=>fail('audio_failure','Worklet fence acknowledgement timed out.'),1000);
 }
 function conversation(text:string,kind:string){const row=document.createElement('p');row.className=kind;row.textContent=text;el('conversation').querySelector('.empty')?.remove();el('conversation').append(row);while(el('conversation').children.length>100)el('conversation').firstElementChild?.remove();}
-function receive(raw:string){if(raw.length>300000)throw new Error('Message bound exceeded');const envelope:ServerMessage=serverWire(raw);if(!envelope||typeof envelope.type!=='string'||envelope.protocol_version!==1||!envelope.payload||typeof envelope.payload!=='object')throw new Error('Malformed protocol');const m={...envelope,...(envelope.payload as Record<string,unknown>)} as Wire;trace('relay_'+m.type,m.type==='audio'?{sequence:m.sequence,response_id:m.response_id}:m);
+function receive(raw:string,evidenceContext:{nonce:string;origin:string;version:number}){if(raw.length>300000)throw new Error('Message bound exceeded');const envelope:ServerMessage=serverWire(raw);if(!envelope||typeof envelope.type!=='string'||envelope.protocol_version!==1||!envelope.payload||typeof envelope.payload!=='object')throw new Error('Malformed protocol');const m={...envelope,...(envelope.payload as Record<string,unknown>)} as Wire;trace('relay_'+m.type,m.type==='audio'?{sequence:m.sequence,response_id:m.response_id}:m);
   if(m.type==='ready'){
     if(connectionReady||m.mode!==mode||m.arm!==arm||typeof m.session_id!=='string'||!Number.isSafeInteger(m.connection_epoch)||!Number.isSafeInteger(m.response_epoch))throw new Error('Invalid or duplicate relay admission');
+    if(m.session_id!==envelope.session_id)throw new Error('Conflicting admitted session identity');
     clearTimer(connectTimer);connectionReady=true;admitted=true;
-    el('evidence').textContent=`${mode.toUpperCase()} � ${String(m.evidence_label??'Runtime unverified')} � No independent acceptance established.`;
+    el('evidence').textContent=`${mode.toUpperCase()} � ${String(m.evidence_label??'Runtime unverified')} � No independent acceptance established.`;
     if(resuming&&retainedSession!==m.session_id)throw new Error('Resumed a different session');if(typeof m.boot_id!=='string')throw new Error('Missing server boot identity');if(resuming&&m.boot_id!==clockBootId)throw new Error('Server restart cannot resume a prior session');if(!resuming){clockBootId=m.boot_id;clockAlignment=new ClockAlignment(clockBootId);clockSequence=0;clockEpoch=Number(m.connection_epoch);}retainedSession=m.session_id;
+    sessionEvidence.admit({session_id:envelope.session_id,run_id:m.run_id,boot_id:m.boot_id,trial_id:m.trial_id},evidenceContext.nonce,evidenceContext.origin,evidenceContext.version);sessionEvidence.observe(envelope);
     if(m.resume_required){
       if(!resuming)throw new Error('Unexpected resume challenge');connection=Number(m.connection_epoch)+1;epoch=Number(m.response_epoch)+1;awaitingResume=true;
       send({type:'resume',connection_epoch:connection,...(lastAck?{rendered_ack:{type:'rendered',...lastAck}}:{})});
@@ -178,8 +182,10 @@ function receive(raw:string){if(raw.length>300000)throw new Error('Message bound
   if(m.type==='clock_pong'){
     const received=performance.now();if(clockAlignment.accept(m,received)){clearTimer(clockTimer);trace('clock_alignment_probe',{browser_send_ms:m.browser_sent_ms,browser_receive_ms:received,server_received_ns:m.server_received_ns,server_sent_ns:m.server_sent_ns,...clockAlignment.summary().samples.at(-1)});nextClockProbe();}else trace('clock_probe_rejected');return;
   }
+  sessionEvidence.observe(envelope);
   if(m.type==='error'){fail(String(m.code),String(m.message));return;}
   if(m.type==='ended'){
+    sessionEvidence.markEnd('relay_ended_observed',envelope.session_id);
     trace('relay_terminal',{outcome:m.outcome,outcome_source:m.outcome_source,receipt:'observed'});
     el('detail').textContent=`Relay terminal: ${String(m.outcome??'unknown')} (${String(m.outcome_source??'unknown source')})`;
     el('terminal').textContent=JSON.stringify({outcome:m.outcome??null,outcome_source:m.outcome_source??null,evidence_reference:m.evidence_reference??null,trace:m.trace??null,receipt:'observed_relay',accounting_status:'see current cost panel and authenticated session evidence'},null,2);
@@ -251,6 +257,7 @@ function observeProbe(data:Record<string,unknown>){
   }
 }
 async function start(){
+  sessionEvidence.clear();const evidenceVersion=sessionEvidence.admissionVersion();
   reviewWorkbench.stopPlayback();if(reviewWorkbench.hasPlayback()){el('error').textContent='Waiting for local review playback cancellation; retry explicitly when it settles.';return;}
   if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','disconnected','recovery_unknown'].includes(state))return;
   if(cleanupPending()){el('error').textContent='Cleanup is still pending. Resolve any microphone prompt, then retry when owned handles close.';return;}
@@ -351,7 +358,7 @@ async function start(){
     const transport=scope.addSocket(new WebSocket(url));socket=transport;
     connectTimer=scope.timer(()=>fail(resuming?'recovery_unknown':'transport_error','Relay connection/admission timed out.'),resuming?Math.max(1,5000-(performance.now()-disconnectedAt)):8000);
     transport.onopen=()=>{if(own!==token)return;try{send({type:'hello',protocol_version:CONSTANTS.PROTOCOL_VERSION,mode,arm,nonce});}catch(error){fail('transport_error',String(error));}};
-    transport.onmessage=event=>{if(own!==token)return;try{if(typeof event.data!=='string')throw new Error('Binary protocol refused');receive(event.data);}catch(error){fail('protocol_error',String(error));}};
+    transport.onmessage=event=>{if(own!==token)return;try{if(typeof event.data!=='string')throw new Error('Binary protocol refused');receive(event.data,{nonce,origin:(url.protocol==='wss:'?'https:':'http:')+'//'+url.host,version:evidenceVersion});}catch(error){fail('protocol_error',String(error));}};
     transport.onerror=()=>{if(own===token){trace('transport_error_observed');if(admitted)lostTransport();else fail('transport_error','Relay connection failed before admission.');}};
     transport.onclose=()=>{if(own===token)lostTransport();};
   }catch(error){
@@ -360,9 +367,9 @@ async function start(){
     fail(code==='NotAllowedError'||code==='SecurityError'?'permission_denied':code==='NotFoundError'||code==='NotReadableError'?'device_lost':code==='NotSupportedError'||error instanceof ReferenceError?'unsupported_audio':'startup_failure',String(error));
   }
 }
-el<HTMLSelectElement>('mode').onchange=()=>{const select=el<HTMLSelectElement>('mode');if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','disconnected','recovery_unknown'].includes(state)){select.value=mode;return;}if(state==='disconnected'||cleanupPending()){select.value=mode;el('error').textContent='End the current recovery and wait for cleanup before switching mode.';return;}++token;mode=select.value==='live'?'live':'mock';document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>{button.querySelector('small')!.textContent=mode==='live'?'Operator capability gate · unverified':button.dataset.arm==='V'?'Wire mock':button.dataset.arm==='C'?'STT → controller → TTS mock':'No generation';});retainedSession=undefined;el('live-consent-label').hidden=mode!=='live';el<HTMLInputElement>('live-consent').checked=false;el<HTMLInputElement>('text').disabled=mode==='live';el('stimulus').querySelector('button')!.disabled=mode==='live';el('evidence').textContent=mode==='live'?'LIVE · GATED / UNVERIFIED. No live activation is authorized by this UI. Separate operator authorization, capabilities, prices and matching relay mode are required; runtime and acoustic behavior remain unverified.':'KEYLESS MOCK · Source construction / runtime unverified. Synthetic tones and typed stimuli cannot establish spoken-task correctness or acoustic latency.';trace('mode_selected',{mode,admission:'server_required'});};
+el<HTMLSelectElement>('mode').onchange=()=>{const select=el<HTMLSelectElement>('mode');if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','disconnected','recovery_unknown'].includes(state)){select.value=mode;return;}if(state==='disconnected'||cleanupPending()){select.value=mode;el('error').textContent='End the current recovery and wait for cleanup before switching mode.';return;}sessionEvidence.clear();++token;mode=select.value==='live'?'live':'mock';document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>{button.querySelector('small')!.textContent=mode==='live'?'Operator capability gate · unverified':button.dataset.arm==='V'?'Wire mock':button.dataset.arm==='C'?'STT → controller → TTS mock':'No generation';});retainedSession=undefined;el('live-consent-label').hidden=mode!=='live';el<HTMLInputElement>('live-consent').checked=false;el<HTMLInputElement>('text').disabled=mode==='live';el('stimulus').querySelector('button')!.disabled=mode==='live';el('evidence').textContent=mode==='live'?'LIVE · GATED / UNVERIFIED. No live activation is authorized by this UI. Separate operator authorization, capabilities, prices and matching relay mode are required; runtime and acoustic behavior remain unverified.':'KEYLESS MOCK · Source construction / runtime unverified. Synthetic tones and typed stimuli cannot establish spoken-task correctness or acoustic latency.';trace('mode_selected',{mode,admission:'server_required'});};
 el('start').onclick=()=>void start();el('end').onclick=end;el('interrupt').onclick=interrupt;el('disconnect').onclick=()=>{if(admitted)lostTransport();};el('retry').onclick=()=>{if(state==='awaiting_response'&&playbackDone&&!activeResponse){listen();}else if(['playing','awaiting_response','listening'].includes(state))interrupt();else void start();};
-document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>button.onclick=()=>{if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown'].includes(state)||cleanupPending())return;retainedSession=undefined;if(!isArm(button.dataset.arm))return;arm=button.dataset.arm;document.querySelectorAll('.arm').forEach(b=>b.classList.toggle('selected',b===button));});
+document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>button.onclick=()=>{if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown'].includes(state)||cleanupPending())return;sessionEvidence.clear();retainedSession=undefined;if(!isArm(button.dataset.arm))return;arm=button.dataset.arm;document.querySelectorAll('.arm').forEach(b=>b.classList.toggle('selected',b===button));});
 el('stimulus').onsubmit=event=>{event.preventDefault();const input=el<HTMLInputElement>('text');if(!input.value.trim())return;try{conversation(`Typed diagnostic: ${input.value}`,'user');commit(input.value);input.value='';}catch(error){fail('stimulus_failure',String(error));}};
 el('download').onclick=()=>{
   const downloadScope=newResources();const link=document.createElement('a');
@@ -370,13 +377,14 @@ el('download').onclick=()=>{
     link.download='voice-lab-browser-trace.json';link.click();downloadScope.raf(()=>{link.remove();downloadScope.close();});
   }catch{link.remove();downloadScope.close();trace('trace_export_failed');}
 };
-window.addEventListener('pagehide',()=>{end();for(const scope of ownedScopes)scope.close();});
+for(const id of ['url','nonce'])el(id).addEventListener('input',()=>sessionEvidence.clear());
+window.addEventListener('pagehide',()=>{sessionEvidence.clear();end();for(const scope of ownedScopes)scope.close();});
 
 // D7's read-only hooks expose a closed metadata allowlist, never input values,
 // relay text/payloads, nonce, raw PCM, transcripts, tracks or socket objects.
 const browserDiagnostics=Object.freeze({
   snapshot(){return {schema_version:1,state,mode,arm,at:performance.now(),clock_domain:'browser_performance_ms',
-    owned_handles:ownedHandles(),review_workbench_handles:reviewWorkbench.handles(),replay_inspector_handles:replayInspector.handles(),
+    owned_handles:ownedHandles(),review_workbench_handles:reviewWorkbench.handles(),replay_inspector_handles:replayInspector.handles(),session_evidence_handles:sessionEvidence.handles(),
     queue_seconds:{playback:context?playbackQueued/context.sampleRate:ownedHandles().worklet>0?null:0,upload:socket?socket.bufferedAmount/64000:ownedHandles().socket>0?null:0},
     observation_statuses:{state:'observed',owned_handles:'observed_api_state',playback_queue:context?'estimated':ownedHandles().worklet>0?'unknown_cleanup_pending':'observed_empty',
       upload_queue:socket?'estimated':ownedHandles().socket>0?'unknown_cleanup_pending':'observed_empty',physical_audio:'unknown',calibration:'unknown',
@@ -407,3 +415,5 @@ const reviewWorkbench=mountReviewWorkbench(el('review-workbench'),{onChanged:()=
 const replayInspector=mountReplayInspector(el('replay-inspector'),{reviewBinding:()=>reviewWorkbench.replayBinding(),focusReview:()=>reviewWorkbench.focus()});
 
 replayRefresh=()=>{replayInspector.refresh();};
+
+const sessionEvidence=mountSessionEvidence(el('session-evidence'),{canInspect:()=>state==='closed'&&Object.values(ownedHandles()).every(n=>n===0)});
