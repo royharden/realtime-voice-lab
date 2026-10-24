@@ -1,7 +1,7 @@
 // A closed display projection of saved evidence, not a relay payload validator.
 // Unknown/custom producer semantics remain unknown; no totals or latency are derived.
 import {isHash,safeRelativePath} from './review-model';
-import {LITERALS} from './generated/contracts';
+import {LITERALS,MODEL_FIELDS,SHAPES,CUSTOM_VALIDATORS_UNEXECUTED,SOURCE_HASHES} from './generated/contracts';
 export type EvidenceOwner={session_id:string;run_id:string;boot_id:string;trial_id:string};
 type Rule='id'|'hash'|'path'|'integer'|'decimal'|'boolean'|'flag'|readonly string[];
 type Fields=Record<string,Rule>;
@@ -14,7 +14,24 @@ const identity:Fields={session_id:'id',run_id:'id',trial_id:'id',boot_id:'id',co
 const terminal:Fields={...identity,arm:['V','C','K'],mode:['mock','live'],terminal_outcome:OUTCOMES,terminal_source:['server','client','relay','browser','deadline','transport','unknown','restart_reconciliation','server_lifecycle','client_status','client_report','mock_fault_simulation'],trace_hash:'hash',trace_complete:'flag',run_manifest_hash:'hash',started_ns:'integer'};
 const artifact:Fields={content_hash:'hash',artifact_hash:'hash',artifact_reference:'path',bytes:'integer',scope:['run_ledger_snapshot'],captured_for_session_id:'id',run_id:'id',boot_id:'id',server_timestamp_ns:'integer',clock_domain:['server_monotonic_ns'],kind:['trace','relay_trace','ledger_snapshot','fault_controls','calibration_phases','session_journal','run_manifest','licensed_control'],path:'path',reference:'path',size_bytes:'integer',observation:['unknown','observed','saved_snapshot','recorded'],reason:['terminal_snapshot_unavailable','saved_snapshot_missing_or_hash_invalid','ledger_snapshot_write_or_read_failure','calibration_snapshot_unavailable','fault_receipts_snapshot_unavailable']};
 const attempt:Fields={...identity,attempt_id:'id',logical_turn_id:'id',transport_turn_id:'id',provider_request_id:'id',component:['stt','tts','native','canned'],arm:['V','C','K'],reservation:'decimal',settled:'decimal',price_version:'id',currency:['USD'],state:['reserved','settled','unknown','released','dispatched','failed'],dispatch_authorized:'boolean',dispatched:'boolean',started:'boolean',owner_id:'id',lineage_observation:['recorded_at_reservation','unknown']};
-const phase:Fields={...identity,phase_id:'id',status:['active','ended'],started_ns:'integer',deadline_ns:'integer',ended_ns:'integer',session_deadline_ns:'integer',absolute_cap_ms:'integer',phase_limit:'integer',clock_domain:['server_ns','server_monotonic_ns'],duplicate:'boolean',task_deadlines_retained:'boolean',captured_turn_created:'boolean',probe_success:['unknown'],runtime_verified:'boolean'};
+// String vocabularies come from the generated canonical field rule (literals, including inside
+// `Literal | None` unions). Field names are typed against MODEL_FIELDS; an absent rule projects null.
+type ShapeRule={kind?:string;values?:unknown[];items?:ShapeRule[];fields?:Record<string,{rule?:ShapeRule}>};
+function literalStrings(rule:ShapeRule|undefined,depth=0):string[]{
+  if(!rule||depth>4)return [];
+  if(rule.kind==='literal')return (rule.values??[]).filter((x):x is string=>typeof x==='string');
+  return rule.kind==='union'?(rule.items??[]).flatMap(item=>literalStrings(item,depth+1)):[];
+}
+function canonical<M extends 'CalibrationReceipt'|'LicensedControlEvidence'>(model:M,field:(typeof MODEL_FIELDS)[M][number]):readonly string[]{
+  return literalStrings((SHAPES[model] as ShapeRule|undefined)?.fields?.[field]?.rule);
+}
+const phase:Fields={...identity,phase_id:'id',status:canonical('CalibrationReceipt','status'),started_ns:'integer',deadline_ns:'integer',ended_ns:'integer',session_deadline_ns:'integer',absolute_cap_ms:'integer',phase_limit:'integer',clock_domain:canonical('CalibrationReceipt','clock_domain'),duplicate:'boolean',task_deadlines_retained:'boolean',captured_turn_created:'boolean',probe_success:canonical('CalibrationReceipt','probe_success'),runtime_verified:'boolean'};
+const LICENSED_LITERALS=['kind','approval_observation','asset_observation','provider_generation_cost_usd','provider_cost_scope','other_costs','task_applicability','spoken_correctness','model_stages','translation','independent_verification'] as const;
+const licensedFields:Fields={config_hash:'hash',catalog_hash:'hash',authorization_reference:'id',capability_reference:'id',...Object.fromEntries(LICENSED_LITERALS.map(f=>[f,canonical('LicensedControlEvidence',f)]))};
+// Canonical fields this projection does not display stay visible by name; their values are never shown.
+const unprojected=(canonicalFields:readonly string[],shown:readonly string[])=>canonicalFields.filter(f=>!shown.includes(f));
+const PHASE_UNPROJECTED=unprojected(MODEL_FIELDS.CalibrationReceipt,Object.keys(phase));
+const LICENSED_UNPROJECTED=unprojected(MODEL_FIELDS.LicensedControlEvidence,[...Object.keys(licensedFields),'asset_hashes']);
 function value(v:unknown,r:Rule):unknown{
   if(v===null)return null;
   if(Array.isArray(r))return typeof v==='string'&&r.includes(v)?v:null;
@@ -68,9 +85,9 @@ export function projectSessionEvidence(input:unknown,owner:EvidenceOwner){
     session_attempts:rows(root.session_attempts,attempt,r=>r.session_id===owner.session_id&&r.lineage_observation==='recorded_at_reservation'),
     attempt_lineage:{...pick(lineage,{scope:['exact_session_id_from_saved_run_snapshot_only'],observation:['saved_snapshot','unknown'],other_session_attempts_excluded:'boolean',inferred_joins:'boolean'}),unresolved_attempt_ids:rows(Array.isArray(lineage.unresolved_attempt_ids)?lineage.unresolved_attempt_ids.map(attempt_id=>({attempt_id})):undefined,{attempt_id:'id'})},
     task_journal:taskMatches?{observation:'received_metadata',correctness:'unknown',state:pick(taskState,{state:['information','slots_offered','awaiting_confirmation','booked','complete'],state_version:'integer',response_epoch:'integer',slot_id:'id'}),booking:pick(taskState.booking,{namespace:'id',operation_id:'id',slot_id:'id',confirmation_turn:'id',epoch:'integer',state_version:'integer'}),attempt_count:value(task.attempt_count,'integer'),truncated:value(task.truncated,'boolean'),original_operations:rows(task.original_operations,operationFields,r=>r.namespace===owner.trial_id,taskExtra),attempts:rows(task.attempts,operationFields,r=>r.namespace===owner.trial_id,taskExtra)}:{observation:'unknown_or_trial_mismatch',correctness:'unknown'},
-    licensed_control:scopedControl?{...pick(licensed,{kind:['licensed_fixed_pcm'],config_hash:'hash',catalog_hash:'hash',authorization_reference:'id',capability_reference:'id',approval_observation:['configuration_only_not_verified','external_verifier_accepted'],asset_observation:['local_wav_and_pcm_hashes_verified_at_open'],provider_generation_cost_usd:['0'],provider_cost_scope:['no_provider_component_only'],other_costs:['unknown'],task_applicability:['not_applicable'],spoken_correctness:['unknown'],independent_verification:['unknown']}),asset_hashes:rows(Object.entries(obj(licensed.asset_hashes)).map(([asset_id,hash])=>({asset_id,hash})),{asset_id:'id',hash:'hash'}),acceptance:'unknown; producer declaration only'}:{observation:'unknown',provider_generation_cost_usd:null,other_costs:'unknown',task_applicability:'unknown'},
-    calibration_phases:rows(root.calibration_phases,phase),
+    licensed_control:scopedControl?{...pick(licensed,licensedFields),asset_hashes:rows(Object.entries(obj(licensed.asset_hashes)).map(([asset_id,hash])=>({asset_id,hash})),{asset_id:'id',hash:'hash'}),acceptance:'unknown; producer declaration only',unprojected_canonical_fields:LICENSED_UNPROJECTED,custom_validators_unexecuted:CUSTOM_VALIDATORS_UNEXECUTED.LicensedControlEvidence}:{observation:'unknown',provider_generation_cost_usd:null,other_costs:'unknown',task_applicability:'unknown'},
+    calibration_phases:{...rows(root.calibration_phases,phase),unprojected_canonical_fields:PHASE_UNPROJECTED,note:'Saved phase rows may omit HTTP receipt-only fields; missing values stay null. No probe success, acoustic calibration or deadline renewal is inferred.'},
     boundaries:{clock_domain:value(root.clock_domain,['server_monotonic_ns']),clock_scope:value(root.clock_scope,['boot_id']),latency:'unknown; no cross-clock subtraction',physical_sound:'unknown',spoken_correctness:'unknown',task_correctness:'unknown',confirmation_correctness:'unknown',provider_generation_zero:'Only applicable when the producer explicitly declares no-provider scope; not inferred here.',other_costs:'unknown'},
-    projection:{unknown_or_missing_fields:null,max_rows_per_list:256,max_depth:12,max_nodes:40000,opaque_fields:'excluded; this is a display projection, not schema validation or acceptance'}
+    projection:{unknown_or_missing_fields:null,max_rows_per_list:256,max_depth:12,max_nodes:40000,opaque_fields:'excluded; this is a display projection, not schema validation or acceptance',generated_source_hashes:SOURCE_HASHES,binding_parity:'structural generated literals only; Python validators and runtime parity unverified'}
   };
 }
