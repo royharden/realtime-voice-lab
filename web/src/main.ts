@@ -6,11 +6,10 @@ import {ClockAlignment} from './clock';
 import {mountReviewWorkbench} from './review-workbench';
 import {mountReplayInspector} from './replay-inspector';
 import {mountSessionEvidence} from './session-evidence';
-import {clientWire,serverWire,isArm} from './boundary';
+import {clientWire,serverVariant,isArm} from './boundary';
 import {CONSTANTS} from './generated/contracts';
-import type {ClientMessage,Hello,ServerMessage,ClientStatus} from './generated/contracts';
+import type {ClientMessage,Hello,ServerMessageVariant,ClientStatus} from './generated/contracts';
 type State = 'idle'|'requesting_permission'|'connecting'|'listening'|'awaiting_response'|'playing'|'interrupting'|'disconnected'|'reconnecting'|'ending'|'closed'|'permission_denied'|'device_lost'|'silence_timeout'|'unsupported_audio'|'device_muted'|'recovery_unknown'|'calibrating'|'failed';
-type Wire = Record<string, unknown> & {type:string};
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `<header><a class="brand" href="#">◉ <span>VOICE LAB</span></a><span class="pill">LOCAL EXPERIMENT · M6</span></header>
 <main><section class="intro"><p class="eyebrow">REALTIME SYSTEMS / COMPARATIVE WORKBENCH</p><h1>Listen to the whole path.</h1><p>One fictional booking task. Three audio pipelines. Every interruption, uncertain boundary, and committed effect stays visible.</p></section>
@@ -160,42 +159,55 @@ function interrupt(){
   pendingCancel={responseId,epoch:epoch+1,minimumCutoff:cancelAck&&cancelAck.response_id===responseId?cancelAck.rendered_through_sample:0};fence();fenceTimer=resources!.timer(()=>fail('audio_failure','Worklet fence acknowledgement timed out.'),1000);
 }
 function conversation(text:string,kind:string){const row=document.createElement('p');row.className=kind;row.textContent=text;el('conversation').querySelector('.empty')?.remove();el('conversation').append(row);while(el('conversation').children.length>100)el('conversation').firstElementChild?.remove();}
-function receive(raw:string,evidenceContext:{nonce:string;origin:string;version:number}){if(raw.length>300000)throw new Error('Message bound exceeded');const envelope:ServerMessage=serverWire(raw);if(!envelope||typeof envelope.type!=='string'||envelope.protocol_version!==1||!envelope.payload||typeof envelope.payload!=='object')throw new Error('Malformed protocol');const m={...envelope,...(envelope.payload as Record<string,unknown>)} as Wire;trace('relay_'+m.type,m.type==='audio'?{sequence:m.sequence,response_id:m.response_id}:m);
-  if(m.type==='ready'){
-    if(connectionReady||m.mode!==mode||m.arm!==arm||typeof m.session_id!=='string'||!Number.isSafeInteger(m.connection_epoch)||!Number.isSafeInteger(m.response_epoch))throw new Error('Invalid or duplicate relay admission');
-    if(m.session_id!==envelope.session_id)throw new Error('Conflicting admitted session identity');
+// Trace metadata only: transcript text, PCM, task challenges and admission detail never enter the trace.
+function relayTraceDetail(m:ServerMessageVariant):Record<string,unknown>{
+  const base={sequence:m.sequence,connection_epoch:m.connection_epoch,response_epoch:m.response_epoch};
+  if(m.type==='audio')return {...base,payload_sequence:m.payload.sequence,response_id:m.payload.response_id};
+  if(m.type==='event')return {...base,event_kind:m.payload.kind};
+  if(m.type==='state')return {...base,relay_state:m.payload.state};
+  if(m.type==='error'||m.type==='ended')return {...base,code:m.type==='error'?m.payload.code:m.payload.reason,outcome:m.payload.outcome};
+  return base;
+}
+function receive(raw:string,evidenceContext:{nonce:string;origin:string;version:number}){if(raw.length>300000)throw new Error('Message bound exceeded');
+  // Closed registry-v1 variant (generated); unknown type/kind or payload shape refuses before any effect.
+  const envelope:ServerMessageVariant=serverVariant(raw);trace('relay_'+envelope.type,relayTraceDetail(envelope));
+  if(envelope.type==='ready'){const m=envelope.payload;
+    if(connectionReady||m.mode!==mode||m.arm!==arm||typeof envelope.session_id!=='string'||!Number.isSafeInteger(envelope.connection_epoch)||!Number.isSafeInteger(envelope.response_epoch))throw new Error('Invalid or duplicate relay admission');
     clearTimer(connectTimer);connectionReady=true;admitted=true;
-    el('evidence').textContent=`${mode.toUpperCase()} � ${String(m.evidence_label??'Runtime unverified')} � No independent acceptance established.`;
-    if(resuming&&retainedSession!==m.session_id)throw new Error('Resumed a different session');if(typeof m.boot_id!=='string')throw new Error('Missing server boot identity');if(resuming&&m.boot_id!==clockBootId)throw new Error('Server restart cannot resume a prior session');if(!resuming){clockBootId=m.boot_id;clockAlignment=new ClockAlignment(clockBootId);clockSequence=0;clockEpoch=Number(m.connection_epoch);}retainedSession=m.session_id;
+    el('evidence').textContent=`${mode.toUpperCase()} · ${String(m.evidence_label??'Runtime unverified')} · No independent acceptance established.`;
+    if(resuming&&retainedSession!==envelope.session_id)throw new Error('Resumed a different session');if(typeof m.boot_id!=='string')throw new Error('Missing server boot identity');if(resuming&&m.boot_id!==clockBootId)throw new Error('Server restart cannot resume a prior session');if(!resuming){clockBootId=m.boot_id;clockAlignment=new ClockAlignment(clockBootId);clockSequence=0;clockEpoch=envelope.connection_epoch;}retainedSession=envelope.session_id;
     sessionEvidence.admit({session_id:envelope.session_id,run_id:m.run_id,boot_id:m.boot_id,trial_id:m.trial_id},evidenceContext.nonce,evidenceContext.origin,evidenceContext.version);sessionEvidence.observe(envelope);
     if(m.resume_required){
-      if(!resuming)throw new Error('Unexpected resume challenge');connection=Number(m.connection_epoch)+1;epoch=Number(m.response_epoch)+1;awaitingResume=true;
+      if(!resuming)throw new Error('Unexpected resume challenge');connection=envelope.connection_epoch+1;epoch=envelope.response_epoch+1;awaitingResume=true;
       send({type:'resume',connection_epoch:connection,...(lastAck?{rendered_ack:{type:'rendered',...lastAck}}:{})});
       setState('reconnecting','Resume dispatched. Awaiting journal/repeat decision; capture remains paused.');
-    }else{if(resuming)throw new Error('Relay lost the requested session');connection=Number(m.connection_epoch);epoch=Number(m.response_epoch);awaitingResume=false;}
+    }else{if(resuming)throw new Error('Relay lost the requested session');connection=envelope.connection_epoch;epoch=envelope.response_epoch;awaitingResume=false;}
     node?.port.postMessage({type:'fence',epoch,connection});
     const remaining=taskDeadline-performance.now();if(remaining<=0){fail('task_deadline','Original 120-second task deadline expired.');return;}
     clearTimer(sessionTimer);sessionTimer=resources!.timer(()=>fail('task_deadline','Original 120-second task limit reached.'),remaining);
     if(awaitingResume)connectTimer=resources!.timer(()=>fail('recovery_unknown','Resume decision timed out.'),Math.max(1,5000-(performance.now()-disconnectedAt)));
     else{disconnectedAt=0;clearTimer(recoveryTimer);listen();beginAlignment();}return;
   }
-  if(m.type==='clock_pong'){
-    const received=performance.now();if(clockAlignment.accept(m,received)){clearTimer(clockTimer);trace('clock_alignment_probe',{browser_send_ms:m.browser_sent_ms,browser_receive_ms:received,server_received_ns:m.server_received_ns,server_sent_ns:m.server_sent_ns,...clockAlignment.summary().samples.at(-1)});nextClockProbe();}else trace('clock_probe_rejected');return;
+  if(envelope.type==='clock_pong'){const m=envelope.payload;
+    const received=performance.now();if(clockAlignment.accept({...m},received)){clearTimer(clockTimer);trace('clock_alignment_probe',{browser_send_ms:m.browser_sent_ms,browser_receive_ms:received,server_received_ns:m.server_received_ns,server_sent_ns:m.server_sent_ns,...clockAlignment.summary().samples.at(-1)});nextClockProbe();}else trace('clock_probe_rejected');return;
   }
   sessionEvidence.observe(envelope);
-  if(m.type==='error'){fail(String(m.code),String(m.message));return;}
-  if(m.type==='ended'){
+  if(envelope.type==='error'){fail(envelope.payload.code,envelope.payload.message);return;}
+  if(envelope.type==='ended'){const m=envelope.payload;
     sessionEvidence.markEnd('relay_ended_observed',envelope.session_id);
     trace('relay_terminal',{outcome:m.outcome,outcome_source:m.outcome_source,receipt:'observed'});
     el('detail').textContent=`Relay terminal: ${String(m.outcome??'unknown')} (${String(m.outcome_source??'unknown source')})`;
     el('terminal').textContent=JSON.stringify({outcome:m.outcome??null,outcome_source:m.outcome_source??null,evidence_reference:m.evidence_reference??null,trace:m.trace??null,receipt:'observed_relay',accounting_status:'see current cost panel and authenticated session evidence'},null,2);
     ++token;setState('ending','Relay ended the session; releasing owned resources.');retainedSession=undefined;awaitingResume=false;releaseAudio();resourcesChanged();return;
   }
-  if(m.type==='task'){el('task').textContent=JSON.stringify(m,null,2);return;}
-  if(m.type==='transcript'){conversation(String(m.text??''),String(m.role??'assistant'));return;}
-  if(m.type==='event'){if(m.kind==='repeat_requested'){repeatRequests++;repeatNext=true;if(repeatRequests>1){fail('recovery_unknown','A second ambiguous recovery cannot replay a request.');return;}trace('repeat_requested',{count:repeatRequests});el('detail').textContent='Journal retained. Repeat your last request explicitly; no prior audio was replayed.';}if(m.kind==='response_done'){finishPlayback();}if(m.accounting)el('cost').textContent=JSON.stringify(m.accounting,null,2);return;}
-  if(m.type==='state'){if(m.task&&typeof m.task==='object')el('task').textContent=JSON.stringify(m.task,null,2);el('detail').textContent=String(m.state??m.message??'Relay state event');if(m.state==='listening'&&awaitingResume){awaitingResume=false;resuming=false;disconnectedAt=0;clearTimer(recoveryTimer);clearTimer(connectTimer);listen();beginAlignment();return;}if(m.state==='listening'&&state==='playing')finishPlayback();return;}
-  if(m.type==='audio'){
+  if(envelope.type==='task'){el('task').textContent=JSON.stringify(envelope.payload,null,2);return;}
+  // Canonical transcript payload has no speaker role; `source` labels it (mock debug / unverified provider).
+  if(envelope.type==='transcript'){conversation(envelope.payload.text,'assistant '+envelope.payload.source);return;}
+  // Registry v1 event payloads carry no accounting; the cost panel is fed by session evidence only.
+  if(envelope.type==='event'){const m=envelope.payload;if(m.kind==='repeat_requested'){repeatRequests++;repeatNext=true;if(repeatRequests>1){fail('recovery_unknown','A second ambiguous recovery cannot replay a request.');return;}trace('repeat_requested',{count:repeatRequests});el('detail').textContent='Journal retained. Repeat your last request explicitly; no prior audio was replayed.';}if(m.kind==='response_done'){finishPlayback();}return;}
+  if(envelope.type==='state'){const m=envelope.payload;if(m.task)el('task').textContent=JSON.stringify(m.task,null,2);el('detail').textContent=m.state;if(m.state==='listening'&&awaitingResume){awaitingResume=false;resuming=false;disconnectedAt=0;clearTimer(recoveryTimer);clearTimer(connectTimer);listen();beginAlignment();return;}if(m.state==='listening'&&state==='playing')finishPlayback();return;}
+  if(envelope.type==='pong')return; // Legacy ping/pong: server timing only, not consumed for alignment.
+  if(envelope.type==='audio'){const m=envelope.payload; // Adapter epochs/sequence inside the payload gate playback.
     if(m.connection_epoch!==connection||m.response_epoch!==epoch){trace('stale_audio_discarded');return;}
     if(m.sample_rate!==24000||typeof m.response_id!=='string'||typeof m.pcm16!=='string'||!Number.isInteger(m.sequence))throw new Error('Invalid audio contract');
     if(activeResponse&&activeResponse!==m.response_id)throw new Error('Concurrent response refused');
