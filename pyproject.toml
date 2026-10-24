@@ -16,12 +16,17 @@ dependencies = [
 
 [project.optional-dependencies]
 validation = ["playwright==1.49.1", "psutil==6.1.1"]
+test = ["pytest==8.3.4"]
 
 [project.scripts]
 voicelab = "voicelab.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/voicelab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 target-version = "py312"
