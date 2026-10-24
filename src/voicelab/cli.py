@@ -33,6 +33,7 @@ def main(argv: Sequence[str] | None = None) -> int | None:
         "review-export": ("voicelab.evaluation.cli", "review-export"),
         "custody-import": ("voicelab.evaluation.cli", "custody-import"),
         "reproduce": ("voicelab.evaluation.cli", "reproduce"),
+        "retention-plan": ("voicelab.evaluation.cli", "retention-plan"),
         "calibrate": ("voicelab.harness.cli", "calibrate"),
         "soak": ("voicelab.harness.cli", "soak"),
         "audit-split": ("voicelab.harness.cli", "audit-split"),
