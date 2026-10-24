@@ -4,7 +4,24 @@ Compare the full path of a native voice arm (V), a deterministic STT → control
 
 **Source construction — runtime unverified.** This repository was built with static checks only. No tests, browser journey, microphone experiment, calibration, soak, provider call, live comparison or independent product acceptance has run. There is no recorded demo or measured result yet. Mock mode uses typed diagnostic text and a short synthetic tone; it cannot establish speech recognition, spoken correctness or physical acoustic latency.
 
-## Keyless quickstart — later activation
+## What source exists (nothing has run)
+
+Every item below is source written under static checks only (syntax/JSON parse, `git diff --check`, focused source review). None of it has been executed, imported by a test run, or validated at runtime.
+
+- **Arms:** keyless V/C/K mocks; guarded live V/C source; conditional licensed fixed-PCM K source (live mode, explicit config, external verifier). No licensed assets, rights, verifier or approval are supplied.
+- **Protocol and gates:** bounded protocol v1 with a closed server payload registry (`contracts/server-payloads-v1.json`, producer-boundary validation); live/K configuration gates; protected HTTP calibration phases.
+- **Task authority and lifecycle:** SQLite TaskAuthority with confirmation challenges; relay lifecycle, deadlines, cancellation, epochs, reconnect and recovery.
+- **Audio:** browser capture/resampling/endpointing, fences, onset and render source.
+- **Accounting:** reserve-before-dispatch all-attempt ledger with reservation-time attempt lineage, bound halts and exposure.
+- **Reports:** deterministic denominator-preserving reports, including K/admission/lineage limitations (generator version 2).
+- **Evaluation:** planning, gates, assembly, custody, adjudication, exposure, sealed reproduction and metadata-only retention planning.
+- **Harness drivers:** browser journey, cohort/catalog/admission, calibration and soak orchestration (Playwright source).
+- **Web:** generated bindings and a protected post-End session evidence inspector.
+- **Tests:** `tests/` holds regression, wire, local-boundary and keyless-journey contract source. **These tests have never been run**; whether they pass is unknown.
+
+Deferred validation (dependency resolution, tests, runtime, browser/device calibration, fixtures, live comparison and independent acceptance) is listed in [limitations](docs/LIMITATIONS.md).
+
+## Keyless quickstart — later activation (not yet executed)
 
 These commands describe the source interfaces; they were not executed during construction. After runtime activation is authorized, resolve/install the pinned Python and web dependencies and generate reviewed locks. Claim and check separate loopback relay/frontend ports with agent-ports before starting listeners. Use Python 3.12 and Node with the pinned Vite/TypeScript versions in `web/package.json`.
 
@@ -32,7 +49,7 @@ V mock uses a documented native wire parser subset and synthetic tool proposals.
 |---|---|---|---|
 | Keyless source path | Implemented; unexecuted | Implemented; unexecuted | Implemented; unexecuted |
 | Receipt/render p50/p95 | Not yet measured | Not yet measured | Not yet measured |
-| Spoken-task correctness | Unknown; tone is not speech | Unknown; tone is not speech | Unknown; tone is not speech |
+| Spoken-task correctness | Unknown; tone is not speech | Unknown; tone is not speech | Not applicable (control); spoken correctness unknown |
 | Cancellation/recovery/soak | Runtime unverified | Runtime unverified | Runtime unverified |
 | Provider compatibility/live cost | Guarded source; unverified | Guarded source; unverified | No provider dispatch |
 
@@ -44,7 +61,7 @@ Raw receipt/render onset, calibrated render, correctness-qualified conditional l
 
 SQLite reservations occur atomically before each possible attempt, including separate C STT/TTS component attempts. Mock requests have an explicit zero-provider basis. Unknown and interrupted reservations remain exposure; duplicate/late usage becomes append-only evidence and cannot refund an immutable unknown. A bound violation halts subsequent admission. Known cost, unknown exposure and estimated components stay separate; rates use captured input, rendered output and elapsed session denominators, with zero denominators undefined. No live budget is approved and no current provider tariff is certified.
 
-## Artifact analysis commands — later use
+## Artifact analysis commands — later use (not yet executed)
 
 These analysis scripts consume saved approved synthetic observations. The local package must first be installed in an authorized environment. A separate explicitly activated browser driver is described below; nothing here has been executed.
 
@@ -70,7 +87,7 @@ Evaluation source prepares the seeded 40-clean/8-fault balanced AB/BA task plan 
 
 ## Guarded live source
 
-The default server CLI remains mock-only. Programmatically supplied server settings may select the V/C live source only after `validate_live_config` admits explicit, unexpired authorization/budget, pinned capabilities/session-update hashes/models, prices/enforceable bounds, voice/output rights and independent evaluation references. No such manifests, provider entitlement or approval are supplied here. The live transport source uses allowlisted TLS WebSocket/HTTP endpoints, actual parsers/serializers and reserve-before-dispatch; absent usage retains liability. Native tool-followup generations reserve separately. K refuses live mode until licensed fixed speech is available.
+The default server CLI remains mock-only. Programmatically supplied server settings may select the V/C live source only after `validate_live_config` admits explicit, unexpired authorization/budget, pinned capabilities/session-update hashes/models, prices/enforceable bounds, voice/output rights and independent evaluation references. No such manifests, provider entitlement or approval are supplied here. The live transport source uses allowlisted TLS WebSocket/HTTP endpoints, actual parsers/serializers and reserve-before-dispatch; absent usage retains liability. Native tool-followup generations reserve separately. K in live mode requires an explicit licensed fixed-PCM control configuration, local approved WAV assets and an operator-injected external approval verifier; none is supplied, so K live stays closed. K output is a descriptive receipt/render control (`control_complete`), never task, spoken or booking success, and its known zero covers only the no-provider-generation component.
 
 An injected trusted synchronous confirmation verifier must evaluate the current captured input and bind namespace, logical/transport turn, epoch, slot/challenge/version and actual ephemeral PCM digests. Provider text/proposals cannot confirm a booking. No independent verifier is supplied; missing evidence refuses confirmation. Microphone PCM stays bounded in memory and is cleared after commit/cancel/close. Live reconnect terminates `recovery_unknown` when provider history consistency cannot be established. See [provider gate schema](docs/PROVIDERS.md).
 
