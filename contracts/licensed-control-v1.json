@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:voicelab:licensed-control:1",
+  "title": "Licensed fixed PCM K serializable configuration reference",
+  "description": "Canonical models are contracts.LicensedControlConfig/Asset/Evidence. Local path, WAV, duration/hash, closed state mapping, expiry and external approval checks are additionally enforced by adapters/licensed.py. The operator-injected approval_verifier callable is outside this JSON spec and must not be supplied as arbitrary code or a URL.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "budget_usd", "asset_root", "catalog_sha256", "assets", "state_assets", "authorization_reference", "capability_reference", "owner_lease_reference", "expires_at_unix"],
+  "properties": {
+    "schema_version": {"const": 1, "default": 1},
+    "run_id": {"$ref": "#/$defs/id"},
+    "budget_usd": {"$ref": "#/$defs/decimal"},
+    "asset_root": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "catalog_sha256": {"$ref": "#/$defs/hash"},
+    "assets": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/asset"}},
+    "state_assets": {
+      "type": "object", "additionalProperties": false,
+      "required": ["information", "slots_offered", "awaiting_confirmation", "booked", "complete"],
+      "properties": {
+        "information": {"$ref": "#/$defs/id"}, "slots_offered": {"$ref": "#/$defs/id"},
+        "awaiting_confirmation": {"$ref": "#/$defs/id"}, "booked": {"$ref": "#/$defs/id"},
+        "complete": {"$ref": "#/$defs/id"}
+      }
+    },
+    "authorization_reference": {"$ref": "#/$defs/id"},
+    "capability_reference": {"$ref": "#/$defs/id"},
+    "owner_lease_reference": {"$ref": "#/$defs/id"},
+    "expires_at_unix": {"type": "integer", "minimum": 1}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9_-]+$"},
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "decimal": {"type": "string", "pattern": "^\\d{1,18}(?:\\.\\d{1,18})?$", "maxLength": 37},
+    "asset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["asset_id", "path", "sha256", "pcm_sha256", "format", "channels", "sample_rate", "frame_count", "duration_seconds", "license_reference", "output_rights_reference", "approval_reference"],
+      "properties": {
+        "asset_id": {"$ref": "#/$defs/id"}, "path": {"type": "string", "minLength": 1, "maxLength": 500},
+        "sha256": {"$ref": "#/$defs/hash"}, "pcm_sha256": {"$ref": "#/$defs/hash"},
+        "format": {"const": "PCM16LE"}, "channels": {"const": 1}, "sample_rate": {"const": 24000},
+        "frame_count": {"type": "integer", "minimum": 1, "maximum": 192000},
+        "duration_seconds": {"$ref": "#/$defs/decimal"},
+        "license_reference": {"$ref": "#/$defs/id"}, "output_rights_reference": {"$ref": "#/$defs/id"},
+        "approval_reference": {"$ref": "#/$defs/id"}
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "config_hash", "catalog_hash", "asset_hashes", "authorization_reference", "capability_reference", "approval_observation", "provider_generation_cost_usd", "provider_cost_scope", "other_costs", "task_applicability", "spoken_correctness", "model_stages", "translation"],
+      "properties": {
+        "kind": {"const": "licensed_fixed_pcm"}, "config_hash": {"$ref": "#/$defs/hash"},
+        "catalog_hash": {"$ref": "#/$defs/hash"},
+        "asset_hashes": {"type": "object", "minProperties": 1, "maxProperties": 32, "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/hash"}},
+        "authorization_reference": {"$ref": "#/$defs/id"}, "capability_reference": {"$ref": "#/$defs/id"},
+        "approval_observation": {"enum": ["configuration_only_not_verified", "external_verifier_accepted"]},
+        "asset_observation": {"enum": [null, "local_wav_and_pcm_hashes_verified_at_open"]},
+        "provider_generation_cost_usd": {"const": "0"}, "provider_cost_scope": {"const": "no_provider_component_only"},
+        "other_costs": {"const": "unknown"}, "task_applicability": {"const": "not_applicable"},
+        "spoken_correctness": {"const": "unknown"}, "model_stages": {"const": "not_applicable"},
+        "translation": {"const": "identity_noop_no_duration"}, "independent_verification": {"const": "unknown"}
+      }
+    }
+  }
+}

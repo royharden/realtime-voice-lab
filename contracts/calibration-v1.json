@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:voicelab:calibration:1",
+  "description": "Protected HTTP POST /sessions/{id}/calibration request. Canonical contracts.CalibrationControl/Receipt; reducer imposes drained idle, at most two phases, absolute30s caps and original120s session deadline. No capture or diagnostic success is asserted.",
+  "type": "object", "additionalProperties": false,
+  "required": ["phase_id", "action"],
+  "properties": {"phase_id": {"$ref": "#/$defs/id"}, "action": {"enum": ["begin", "end"]}},
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9_-]+$"},
+    "ns": {"type": "integer", "minimum": 0},
+    "epoch": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phase_id", "status", "started_ns", "deadline_ns", "ended_ns", "session_deadline_ns", "absolute_cap_ms", "phase_limit", "clock_domain", "duplicate", "session_id", "run_id", "trial_id", "boot_id", "connection_epoch", "response_epoch", "task_deadlines_retained", "captured_turn_created", "probe_success", "runtime_verified"],
+      "properties": {
+        "phase_id": {"$ref": "#/$defs/id"}, "status": {"enum": ["active", "ended"]},
+        "started_ns": {"$ref": "#/$defs/ns"}, "deadline_ns": {"$ref": "#/$defs/ns"},
+        "ended_ns": {"anyOf": [{"$ref": "#/$defs/ns"}, {"type": "null"}]},
+        "session_deadline_ns": {"$ref": "#/$defs/ns"}, "absolute_cap_ms": {"const": 30000},
+        "phase_limit": {"const": 2}, "clock_domain": {"const": "server_monotonic_ns"}, "duplicate": {"type": "boolean"},
+        "session_id": {"$ref": "#/$defs/id"}, "run_id": {"$ref": "#/$defs/id"},
+        "trial_id": {"$ref": "#/$defs/id"}, "boot_id": {"$ref": "#/$defs/id"},
+        "connection_epoch": {"$ref": "#/$defs/epoch"}, "response_epoch": {"$ref": "#/$defs/epoch"},
+        "task_deadlines_retained": {"const": true}, "captured_turn_created": {"const": false},
+        "probe_success": {"const": "unknown"}, "runtime_verified": {"const": false}
+      }
+    }
+  }
+}

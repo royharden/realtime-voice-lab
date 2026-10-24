@@ -9,7 +9,8 @@ from voicelab.contracts import AdmissionEvidence
 
 def admission_evidence(*, mode: str, run_id: str, run_manifest_hash: str | None,
                        owner_id: str, config: dict | None = None,
-                       observed_models: dict[str, str] | None = None) -> dict:
+                       observed_models: dict[str, str] | None = None,
+                       observed_control: dict | None = None) -> dict:
     config, observed_models = config or {}, observed_models or {}
     manifests = config.get('manifests', {})
     fingerprints = {}
@@ -36,6 +37,7 @@ def admission_evidence(*, mode: str, run_id: str, run_manifest_hash: str | None,
     try:
         return AdmissionEvidence(mode=mode, run_id=run_id, run_manifest_hash=run_manifest_hash,
             manifest_hashes=fingerprints, requested_models=requested, requested_voice=config.get('voice'),
+            licensed_control=observed_control or config.get('licensed_control'),
             expected_returned_models={key: value for key, value in caps.get('returned_models', {}).items() if key in requested},
             actually_returned_models=actual, budget_usd=config.get('budget_usd', '0'), budget_owner={
                 'scope': auth.get('budget_owner_scope', 'unknown') if mode == 'live' else 'mock_local_run',

@@ -35,6 +35,9 @@ class SessionState:
     generation_done: bool = False
     last_input_ns: int = field(default_factory=time.monotonic_ns)
     response_turn: str | None = None
+    calibration_id: str | None = None
+    calibration_deadline_ns: int | None = None
+    calibration_phases: dict[str, dict] = field(default_factory=dict)
 
     def check_live(self) -> None:
         if self.closed:
@@ -49,11 +52,45 @@ class SessionState:
             return None
         if now - self.started_ns >= 120_000_000_000:
             return "task_deadline"
+        if self.calibration_deadline_ns is not None and now >= self.calibration_deadline_ns:
+            return "calibration_invalid"
         if self.state in {"awaiting_response", "playing"} and self.response_started_ns is not None and now - self.response_started_ns >= 10_000_000_000:
             return "response_deadline"
         if self.state in {"listening", "capturing"} and now - self.last_input_ns >= 8_000_000_000:
             return "silence_timeout"
         return None
+
+    def calibration(self, phase_id: str, action: str) -> dict:
+        self.check_live()
+        if self.deadline_reason() is not None:
+            raise SessionViolation(self.deadline_reason())
+        previous = self.calibration_phases.get(phase_id)
+        # Duplicate requests return original boundaries; they never renew any deadline.
+        if previous and (action == 'begin' or previous['status'] == 'ended'):
+            return {**previous, 'duplicate': True}
+        if action == 'begin':
+            if (len(self.calibration_phases) >= 2 or self.state != 'listening' or self.active_turn is not None
+                    or (self.active_response is not None and (not self.generation_done
+                        or self.rendered_through_sample != self.response_samples))):
+                raise SessionViolation('calibration_phase_refused')
+            now = time.monotonic_ns()
+            self.calibration_id = phase_id
+            self.calibration_deadline_ns = min(now + 30_000_000_000, self.started_ns + 120_000_000_000)
+            self.state = 'calibrating'
+            previous = {'phase_id': phase_id, 'status': 'active', 'started_ns': now,
+                'deadline_ns': self.calibration_deadline_ns, 'ended_ns': None,
+                'session_deadline_ns': self.started_ns + 120_000_000_000,
+                'connection_epoch': self.connection_epoch, 'response_epoch': self.response_epoch,
+                'absolute_cap_ms': 30000, 'phase_limit': 2, 'clock_domain': 'server_monotonic_ns'}
+            self.calibration_phases[phase_id] = previous
+        elif action == 'end' and self.calibration_id == phase_id and previous is not None:
+            previous.update(status='ended', ended_ns=time.monotonic_ns())
+            self.calibration_id = None
+            self.calibration_deadline_ns = None
+            self._listen()
+        else:
+            raise SessionViolation('calibration_phase_conflict')
+        return {**previous, 'duplicate': False}
 
     def admit_audio(self, turn: str, connection_epoch: int, response_epoch: int, sequence: int, samples: int) -> None:
         self.check_live()
@@ -144,6 +181,8 @@ class SessionState:
 
     def interrupt(self, next_epoch: int, cutoff: int) -> tuple[str | None, int]:
         self.check_live()
+        if self.calibration_id is not None:
+            raise SessionViolation('calibration_phase_active')
         if next_epoch != self.response_epoch + 1 or cutoff < self.rendered_through_sample or cutoff > self.response_samples:
             raise SessionViolation("invalid_cancel_fence")
         previous = self.active_response
@@ -178,6 +217,9 @@ class SessionState:
 
     def disconnect(self) -> None:
         self.check_live()
+        # A disconnected calibration cannot acquire a fresh phase deadline on reconnect.
+        if self.calibration_id is not None:
+            raise SessionViolation('calibration_invalid')
         self.state = "disconnected"
         self.disconnect_ns = time.monotonic_ns()
 

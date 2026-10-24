@@ -129,3 +129,27 @@ Later validation must exercise full browser→relay→wire parser→authority→
 journeys, cancellation, reconnect and cleanup, before offline evidence is admissible.
 Licensed fixtures, calibration, independent heldout custody, approved provider/budget
 manifests and independent live product acceptance remain separate gates.
+
+## Conditional licensed K and integration source
+
+The live K branch is a separate LicensedKSession on the same ArmSession/relay
+capture, commit, authority snapshot, PCM, render, cancellation, reconnect and epoch
+paths. It loads only an explicitly approved finite local pinned WAV catalog after a
+real external approval callback. It reads authority state to select a fixed clip;
+it submits no command or booking and supplies no speech/intent interpretation.
+The F1 distinct-turn confirmation guard remains unchanged. A rendered control is
+control_complete, separate from task success. Partial/unknown playback is never
+replayed. One second of unacknowledged audio bounds its producer; the common relay
+retains its independent queue/response/session bounds. It fabricates no model stage
+or translation duration. No asset, actual approval callback or live activation is
+provided. INTERFACES.md and contracts/licensed-control-v1.json describe the pins.
+
+A protected bounded HTTP calibration phase pauses only idle silence admission for
+local diagnostics, at most twice for30s each under the original120s session deadline.
+It allocates no capture/logical turn or epoch, renews no logical response deadline,
+and asserts no probe success. Active capture/commit/interrupt and disconnected
+calibration refuse. Canonical phase snapshots survive End with hashes/references.
+Exact attempts now retain actual session/trial/logical/transport/epoch lineage at
+reservation; historical missing lineage remains unknown. Session evidence filters
+only recorded exact matches from the unchanged saved run ledger snapshot and never
+constructs a second total. These are source contracts, not execution observations.

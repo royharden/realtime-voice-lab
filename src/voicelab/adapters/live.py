@@ -150,6 +150,7 @@ def validate_live_config(config: dict, arm: str) -> dict:
 class LiveArmSession:
     def __init__(self, arm, *, task_authority, trial_namespace, ledger, config):
         self.config = validate_live_config(config, arm)
+        self.session_id = config.get('session_id')
         if ledger.budget != Decimal(self.config['budget_usd']):
             raise ValueError('ledger budget differs from authorization')
         self.arm, self.authority, self.namespace, self.ledger = arm, task_authority, trial_namespace, ledger
@@ -237,7 +238,9 @@ class LiveArmSession:
         self.ledger.reserve(attempt, amount=Decimal(str(tariff['bound_usd'])),
             logical_turn_id=logical or self.bindings.get(turn, turn), arm=self.arm, component=component,
             price_version=price['version'], basis=tariff['bound_basis'],
-            terms=self.config['reservation_terms'][component], trial_id=self.namespace)
+            terms=self.config['reservation_terms'][component], trial_id=self.namespace,
+            session_id=self.session_id, transport_turn_id=turn,
+            connection_epoch=self.connection_epoch, response_epoch=self.response_epoch)
         self.attempts[key] = attempt
         self.all_attempts.append(attempt)
         self.attempt_components[attempt] = component

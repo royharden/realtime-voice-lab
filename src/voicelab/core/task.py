@@ -12,9 +12,24 @@ SLOTS = ({"id": "slot-a", "label": "Tuesday 10:00 AM"}, {"id": "slot-b", "label"
 COMMANDS = frozenset({"get_hours", "list_slots", "select_slot", "confirm_slot", "get_status"})
 
 
+class TaskEvidenceUnavailable(ValueError):
+    pass
+
+
 class TaskAuthority:
-    def __init__(self, sqlite_path: str | Path):
+    def __init__(self, sqlite_path: str | Path, *, readonly: bool = False):
         self.path = str(sqlite_path)
+        self.readonly = readonly
+        if readonly:
+            if self.path == ':memory:':
+                raise TaskEvidenceUnavailable('task_evidence_unavailable')
+            self.db = sqlite3.connect(Path(self.path).resolve(strict=True).as_uri() + '?mode=ro',
+                uri=True, isolation_level=None, check_same_thread=False)
+            self.db.row_factory = sqlite3.Row
+            self.db.execute('PRAGMA query_only=ON')
+            self.db.execute('PRAGMA busy_timeout=5000')
+            self.db.execute('BEGIN')
+            return
         # One persistent connection also preserves :memory: for explicitly local callers.
         self.db = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -57,9 +72,15 @@ class TaskAuthority:
     def _ensure(self, namespace: str) -> None:
         if not namespace or len(namespace) > 128:
             raise ValueError("invalid_trial_namespace")
+        if self.readonly:
+            if self.db.execute('SELECT 1 FROM task_trials WHERE namespace=?', (namespace,)).fetchone() is None:
+                raise TaskEvidenceUnavailable('task_evidence_unavailable')
+            return
         self.db.execute("INSERT OR IGNORE INTO task_trials(namespace,state,version) VALUES(?, 'information', 0)", (namespace,))
 
     def set_epoch(self, trial_namespace: str, response_epoch: int) -> None:
+        if self.readonly:
+            raise TaskEvidenceUnavailable('task_evidence_readonly')
         if type(response_epoch) is not int or not 0 <= response_epoch <= 1_000_000:
             raise ValueError("invalid_epoch")
         self.db.execute("BEGIN IMMEDIATE")
@@ -94,6 +115,8 @@ class TaskAuthority:
         return {"state": row["state"], "state_version": row["version"], "slot_id": row["slot_id"], "challenge": row["challenge"], "response_epoch": row["epoch"], "booking": dict(booking) if booking else None}
 
     def execute(self, trial_namespace: str, command: str, arguments: dict[str, Any], *, logical_turn_id: str, response_epoch: int, explicit_confirmation: bool = False, before_effect: Callable[[], bool] | None = None) -> dict[str, Any]:
+        if self.readonly:
+            raise TaskEvidenceUnavailable('task_evidence_readonly')
         if command not in COMMANDS or not logical_turn_id or len(logical_turn_id) > 96:
             raise ValueError("invalid_task_command")
         if not isinstance(arguments, dict):

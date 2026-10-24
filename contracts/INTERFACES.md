@@ -202,3 +202,88 @@ traversal/ADS/reserved names, current root/child symlink/junction/hardlink escap
 and output outside the configured root. Use an operator-owned root with no competing
 filesystem writer; atomic protection against concurrent link replacement is not
 claimed. Provider errors/usage telemetry omit raw credentials/audio/transcript text.
+
+## Conditional licensed fixed PCM K
+
+`Settings.k_control_config` defaults to None. Enabling K requires explicit live mode,
+enabled_arms including K, a pinned run_manifest_hash, and canonical
+`LicensedControlConfig` plus a synchronous operator-injected `approval_verifier`.
+The serializable spec is referenced by `licensed-control-v1.json`; code never loads
+arbitrary callbacks/code/URLs from JSON. No assets, authentic verifier, approval,
+rights, prices, provider keys or activation are supplied by this construction.
+V/C keep their existing gates; mixed arms require one run ID and equal run budget.
+Supplying a licensed control config in mock mode refuses rather than using a tone.
+
+Finite 1..32 strict WAV assets are PCM16LE mono24k, at most192000 frames/8s each,
+with exact WAV/PCM hashes and duration. Catalog hash pins `{assets,state_assets}`
+using existing sorted compact ensure_ascii JSON plus LF; config_hash uses the same
+codec over full model JSON including schema_version, excluding the callable.
+Mapping covers exactly actual authority states information, slots_offered,
+awaiting_confirmation, booked, complete. Paths are local relative asset names
+under an explicit absolute local root; UNC/remote/link/traversal/hardlink/oversize
+and incompatible WAV input refuse. Existing catalog read/WAV and security path
+helpers are reused. Approval callback receives hash/run-manifest/lease/owner/
+expiry/asset-rights context and must return literal true before any asset playback.
+Opaque external refs and accepted callbacks are not independent verification.
+
+K reads actual authority state only. It performs no recognition, guessed command,
+slot selection or confirmation; F1 remains unchanged. Task payload adds
+control_only=true, task_applicability=not_applicable, spoken_correctness=unknown,
+code=licensed_fixed_control_no_intent_inference, asset_id,catalog_hash and the actual
+authority snapshot. PCM uses common capture/commit/playback/epoch/cancel/reconnect
+bounds and validated render ACK backpressure; unknown heard audio is never replayed.
+`control_complete` is an additive terminal outcome for completed descriptive render
+control, never task/spoken correctness. It requires actual complete render ACK.
+Missing intent/proof is not supplied by the clip. No model/STT/controller duration
+is invented; model_stages=not_applicable, translation=identity_noop_no_duration.
+
+AdmissionEvidence adds nullable `LicensedControlEvidence`: pinned config/catalog/
+asset hashes, capability/auth refs, explicit approval/asset observations, model/task
+applicability and cost scope. GET configuration has no asset read/approval/provider
+probe. Only actual future open records external_verifier_accepted and verified local
+WAV/PCM hashes. Provider requested/returned model maps are empty for this component.
+Ledger mode local_control/canned/local-control-zero-v1 declares only no-provider
+generation known zero, under shared run owner/halt checks and immutable terms.
+License, study and local compute costs remain unknown; this is not a zero total bill.
+
+## Bounded diagnostics phase and exact attempt lineage
+
+Protected `POST /sessions/{id}/calibration` body ONLY `{phase_id,action:begin|end}`,
+max512 bytes, has canonical `CalibrationControl`/`CalibrationReceipt` and
+`calibration-v1.json`. Begin requires relay listening, no capture and a fully drained
+response. Consumer separately proves paused/drained browser state. At most two
+distinct phases per session, each capped30s and clipped to original120s session
+deadline. No keepalive/capture turn, epoch change, response deadline renewal or
+probe success. Capture/commit/interrupt while active refuse. Disconnect/expiry
+terminates calibration_invalid. Same-ID retries retain original boundaries and
+phase-start epochs; begin after end returns the ended receipt, never renews it.
+The HTTP receipt does not change browser state. End explicitly after diagnostics.
+VoiceEvent adds calibration_phase with phase_id,phase_action,phase_deadline_ns.
+Post-End evidence retains canonical hash-referenced calibration snapshot separately
+from raw trace; status active at terminal means incomplete, not successful probes.
+
+Ledger attempts add session_id, transport_turn_id, connection_epoch,response_epoch
+alongside trial_id/logical_turn_id/owner_id and lineage_observation:
+recorded_at_reservation or unknown. All new adapter reservations bind actual relay
+session/current transport and epochs; historical absent fields remain null/unknown.
+Non-mock reservations require full lineage. No transport/provider ID is relabeled
+as a logical turn. GET evidence.session_attempts projects ONLY recorded exact session
+matches from the saved canonical run ledger snapshot; attempt_lineage reports
+unresolved_attempt_ids and missing snapshot unknown. Totals/hash/ref remain the
+original single atomic ledger snapshot; active observations invent no terminal data.
+
+ServerMessage.payload is still dict[str,object]. No exhaustive authoritative server
+payload schema/export registry exists. Typed HTTP/K models above are canonical;
+complete generated websocket payload bindings require a separately dispatched source
+registry. JSON references/AST bindings do not execute custom validators or prove
+runtime parity. Dirty Mode leaves all runtime behavior unverified.
+
+Protected read-only `POST /sessions/{id}/evidence` accepts exactly the two UTF-8
+bytes `{}` (no fields, whitespace or alternate JSON values), with a32-byte transport
+body bound and2s read cap. It calls the same canonical GET reader, keeping all
+session/path/hash/snapshot/error guards and the exact Host/Origin/X-Voicelab-Nonce
+boundary. GET is unchanged for harness readers. POST adds no mutation, total,
+provider call or origin/CORS relaxation. Browser consumers use same-origin POST and
+browser-generated Origin, never attempt to forge the forbidden Origin header.
+Invalid body/bound/timeout yields fixed400/413/408 codes, respectively
+evidence_read_empty_object_required/evidence_read_body_bound/evidence_read_body_timeout.

@@ -311,3 +311,49 @@ refusal, stale cancellation, five-second reconnect and cleanup; calibrate actual
 hardware and run bounded soak; obtain licensed speech and independent custody; refresh
 capabilities/prices and get explicit live budget authorization; perform independent
 product acceptance. Until then all runtime behavior and measured outcomes are unknown.
+
+## Licensed fixed PCM K source configuration
+
+K live is conditionally constructed, still closed without actual operator inputs.
+Settings.k_control_config defaultsNone and requires explicit live enabled_arms K
+and run_manifest_hash. The JSON-serializable LicensedControlConfig pins run/budget,
+absolute local asset_root, finite assets, catalog_sha256, complete state_assets,
+authorization/capability/owner-lease refs and expiry. Add the genuine synchronous
+approval_verifier through trusted operator injection, never arbitrary code from
+JSON. This package supplies no verifier, approved refs, licensed assets or CLI path
+for callback installation; root CLI configuration remains a separately owned seam.
+See contracts/licensed-control-v1.json and INTERFACES.md for exact fields and codec.
+
+Assets are strict WAV PCM16LE mono24k, at most32 files and8s each, exact container/
+PCM hashes and duration. Existing catalog/security checks reject remote/UNC,
+traversal, links/hardlinks, malformed/oversized input. Use a local operator-owned
+root with no competing filesystem writer; atomic defense against hostile link
+replacement is not claimed. No asset is generated, downloaded or provided now.
+Actual future open verifies external approval and reads/hash-checks the pinned files;
+GET /admission only fingerprints declarations and cannot claim this happened.
+
+K captures input on the common path but does not understand it or emit a fake
+transcript. Actual authority state chooses a fixed clip, with no guessed intent,
+slot selection, affirmative proof or booking. control_complete is descriptive
+receipt/render control only; task/spoken correctness stay not-applicable/unknown.
+Do not include it as V/C qualified task success or subtract control percentiles
+causally. Model stages are not applicable and translation is an identity no-op with
+no fabricated duration. Known provider-generation cost0 applies only to its
+no-provider component; license, study and local compute costs remain unknown.
+
+For local diagnostics use protected POST /sessions/{id}/calibration with ONLY
+phase_id and action begin/end. Confirm drained paused browser/worklet state before
+begin; HTTP acceptance does not prove that browser condition or probe success.
+At most2 phases,30s absolute each, clipped to the original120s session deadline.
+No capture keepalive, turn, epoch or response deadline extension is authorized.
+Explicitly end the phase after probes, including unsuccessful probe cleanup.
+Duplicate IDs preserve original boundaries; expiry/disconnect produces bounded
+calibration failure. Post-End calibration snapshots remain readable and active at
+terminal means incomplete. Missing/failed producer or consumer evidence remains
+unknown; no calibration or other workflow has been run in Dirty Mode.
+
+Session evidence.session_attempts is an exact-session projection of the saved
+run ledger, with reservation-time trial/logical/transport/epoch lineage. Old missing
+fields remain unknown; do not guess using matching transport names or whole-run
+snapshot totals. No typed comprehensive ServerMessage payload registry exists yet;
+that is a named unbuilt binding source gap, separate from these conditional sources.

@@ -213,7 +213,10 @@ class MockArmSession:
                 component_id = attempt_id + '-' + component
                 self.ledger.reserve(component_id, amount=Decimal('0'), logical_turn_id=logical_turn_id,
                                     arm=self.arm, component=component, price_version='mock-zero-v1',
-                                    basis='No provider egress; diagnostic synthetic mock only', trial_id=self.namespace)
+                                    basis='No provider egress; diagnostic synthetic mock only', trial_id=self.namespace,
+                                    **({'session_id': self.config['session_id'], 'transport_turn_id': turn_id,
+                                        'connection_epoch': self.connection_epoch, 'response_epoch': self.response_epoch}
+                                       if self.config.get('session_id') else {}))
                 reserved.append(component_id)
             for component_id in reserved:
                 self.ledger.authorize_dispatch(component_id)
@@ -347,6 +350,10 @@ def create_arm(arm: str, *, task_authority, trial_namespace: str, ledger, config
     if arm not in {'V', 'C', 'K'}:
         raise ValueError('unsupported arm')
     if (config or {}).get('mode', 'mock') == 'live':
+        if arm == 'K' and (config or {}).get('licensed_control') is not None:
+            from .licensed import LicensedKSession
+            return LicensedKSession(task_authority=task_authority, trial_namespace=trial_namespace,
+                                    ledger=ledger, config=config)
         from .live import LiveArmSession
         return LiveArmSession(arm, task_authority=task_authority, trial_namespace=trial_namespace,
                               ledger=ledger, config=config)

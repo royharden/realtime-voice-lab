@@ -12,7 +12,7 @@ MAX_SNAPSHOT_BYTES = 32_000_000
 
 
 def save_snapshot(root: Path, session_id: str, kind: str, data: dict) -> dict[str, object]:
-    if kind not in {"ledger_snapshot", "fault_controls"}:
+    if kind not in {"ledger_snapshot", "fault_controls", "calibration_phases"}:
         raise ValueError("unsupported_snapshot_kind")
     raw = (json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
     if len(raw) > MAX_SNAPSHOT_BYTES:

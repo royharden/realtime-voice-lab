@@ -277,6 +277,16 @@
     },
     "independent_verification": {
       "const": "unknown"
+    },
+    "licensed_control": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "licensed-control-v1.json#/$defs/evidence"
+        }
+      ]
     }
   }
 }

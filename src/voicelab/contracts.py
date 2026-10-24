@@ -14,7 +14,7 @@ MAX_FRAME_SAMPLES = 4_800
 MAX_MESSAGE_BYTES = 24_000
 Identifier = Annotated[str, Field(min_length=1, max_length=96, pattern=r"^[A-Za-z0-9_-]+$")]
 Epoch = Annotated[int, Field(strict=True, ge=0, le=1_000_000)]
-TerminalOutcome = Literal["success", "task_failure", "off_script", "permission_denied", "silence_timeout", "device_lost", "provider_error", "provider_timeout", "transport_loss", "service_restart", "abandoned", "queue_overrun", "calibration_invalid", "budget_halt", "expected_interruption", "recovery_unknown", "missing_terminal", "protocol_error", "unsupported_audio"]
+TerminalOutcome = Literal["success", "task_failure", "off_script", "permission_denied", "silence_timeout", "device_lost", "provider_error", "provider_timeout", "transport_loss", "service_restart", "abandoned", "queue_overrun", "calibration_invalid", "budget_halt", "expected_interruption", "recovery_unknown", "missing_terminal", "protocol_error", "unsupported_audio", "control_complete"]
 
 
 class Model(BaseModel):
@@ -29,7 +29,7 @@ ProviderIdentityTag = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-
 class ReservationTerms(Model):
     """Operator-supplied prices and bounds; this model supplies no tariff or entitlement."""
     schema_version: Literal[1] = 1
-    mode: Literal["mock", "live"]
+    mode: Literal["mock", "live", "local_control"]
     component: Literal["native", "stt", "tts", "canned"]
     model: ProviderIdentityTag
     currency: Literal["USD"]
@@ -65,6 +65,10 @@ class ReservationTerms(Model):
                 raise ValueError("reservation_does_not_cover_declared_usage_bounds")
             if self.mode == "mock" and (bound != 0 or maximum != 0 or self.price_version != "mock-zero-v1"):
                 raise ValueError("mock_requires_explicit_zero_provider_basis")
+            if self.mode == "local_control" and (bound != 0 or maximum != 0 or self.component != "canned"
+                    or self.price_version != "local-control-zero-v1" or set(self.rates) != {"provider_requests"}
+                    or self.usage_bounds != {"provider_requests": "0"}):
+                raise ValueError("local_control_requires_no_provider_component_only")
         return self
 
 
@@ -90,6 +94,31 @@ class BudgetOwnerEvidence(Model):
     lease_verified: Literal["unknown"] = "unknown"
 
 
+class LicensedControlEvidence(Model):
+    kind: Literal['licensed_fixed_pcm']
+    config_hash: Annotated[str, Field(pattern=r'^[a-f0-9]{64}$')]
+    catalog_hash: Annotated[str, Field(pattern=r'^[a-f0-9]{64}$')]
+    asset_hashes: Annotated[dict[Identifier, Annotated[str, Field(pattern=r'^[a-f0-9]{64}$')]], Field(min_length=1, max_length=32)]
+    authorization_reference: Identifier
+    capability_reference: Identifier
+    approval_observation: Literal['configuration_only_not_verified', 'external_verifier_accepted']
+    asset_observation: Literal['local_wav_and_pcm_hashes_verified_at_open'] | None = None
+    provider_generation_cost_usd: Literal['0']
+    provider_cost_scope: Literal['no_provider_component_only']
+    other_costs: Literal['unknown']
+    task_applicability: Literal['not_applicable']
+    spoken_correctness: Literal['unknown']
+    model_stages: Literal['not_applicable']
+    translation: Literal['identity_noop_no_duration']
+    independent_verification: Literal['unknown'] = 'unknown'
+
+    @model_validator(mode='after')
+    def opened_observation(self) -> LicensedControlEvidence:
+        if (self.approval_observation == 'external_verifier_accepted') != (self.asset_observation is not None):
+            raise ValueError('licensed_control_open_observation_mismatch')
+        return self
+
+
 class AdmissionEvidence(Model):
     schema_version: Literal[1] = 1
     mode: Literal["mock", "live"]
@@ -105,6 +134,72 @@ class AdmissionEvidence(Model):
     budget_usd: DecimalText
     budget_owner: BudgetOwnerEvidence
     independent_verification: Literal["unknown"] = "unknown"
+    licensed_control: LicensedControlEvidence | None = None
+
+
+class CalibrationControl(Model):
+    """Protected HTTP phase control; never a capture turn or deadline keepalive."""
+    phase_id: Identifier
+    action: Literal["begin", "end"]
+
+
+class CalibrationReceipt(Model):
+    phase_id: Identifier
+    status: Literal['active', 'ended']
+    started_ns: Annotated[int, Field(strict=True, ge=0)]
+    deadline_ns: Annotated[int, Field(strict=True, ge=0)]
+    ended_ns: Annotated[int | None, Field(strict=True, ge=0)]
+    session_deadline_ns: Annotated[int, Field(strict=True, ge=0)]
+    absolute_cap_ms: Literal[30000]
+    phase_limit: Literal[2]
+    clock_domain: Literal['server_monotonic_ns']
+    duplicate: bool
+    session_id: Identifier
+    run_id: Identifier
+    trial_id: Identifier
+    boot_id: Identifier
+    connection_epoch: Epoch
+    response_epoch: Epoch
+    task_deadlines_retained: Literal[True]
+    captured_turn_created: Literal[False]
+    probe_success: Literal['unknown']
+    runtime_verified: Literal[False]
+
+
+class LicensedControlAsset(Model):
+    asset_id: Identifier
+    path: Annotated[str, Field(min_length=1, max_length=500)]
+    sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+    pcm_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+    format: Literal["PCM16LE"]
+    channels: Literal[1]
+    sample_rate: Literal[24000]
+    frame_count: Annotated[int, Field(strict=True, ge=1, le=192000)]
+    duration_seconds: DecimalText
+    license_reference: Identifier
+    output_rights_reference: Identifier
+    approval_reference: Identifier
+
+    @field_validator('channels', 'sample_rate', mode='before')
+    @classmethod
+    def integer_audio_format(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError('licensed_control_integer_audio_format_required')
+        return value
+
+
+class LicensedControlConfig(Model):
+    schema_version: Literal[1] = 1
+    run_id: Identifier
+    budget_usd: DecimalText
+    asset_root: Annotated[str, Field(min_length=1, max_length=1000)]
+    catalog_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+    assets: Annotated[list[LicensedControlAsset], Field(min_length=1, max_length=32)]
+    state_assets: dict[Literal["information", "slots_offered", "awaiting_confirmation", "booked", "complete"], Identifier]
+    authorization_reference: Identifier
+    capability_reference: Identifier
+    owner_lease_reference: Identifier
+    expires_at_unix: Annotated[int, Field(strict=True, ge=1)]
 
 
 class Hello(Model):
@@ -253,7 +348,7 @@ class VoiceEvent(Model):
     connection_epoch: Epoch
     response_epoch: Epoch
     sequence: Annotated[int, Field(strict=True, ge=0)]
-    kind: Literal["session_started", "turn_started", "turn_ended", "fault_control", "clock_probe", "audio_received", "commit_received", "transcript", "controller_start", "controller_end", "audio_sent", "rendered_ack", "cancel_dispatch", "fence_applied", "stale_discarded", "reconnect", "repeat_requested", "effect_commit", "provider_event", "integrity_error", "session_ended", "error"]
+    kind: Literal["session_started", "turn_started", "turn_ended", "calibration_phase", "fault_control", "clock_probe", "audio_received", "commit_received", "transcript", "controller_start", "controller_end", "audio_sent", "rendered_ack", "cancel_dispatch", "fence_applied", "stale_discarded", "reconnect", "repeat_requested", "effect_commit", "provider_event", "integrity_error", "session_ended", "error"]
     timestamp: Annotated[int | float, Field(ge=0, allow_inf_nan=False)]
     clock_domain: Literal["server_monotonic_ns", "browser_performance_ms", "audio_context_samples", "provider_unknown"]
     observation: Literal["observed", "estimated", "unknown"] = "observed"
@@ -276,6 +371,9 @@ class VoiceEvent(Model):
     injected_count: Annotated[int | None, Field(strict=True, ge=0, le=128)] = None
     provider_tool_id: Identifier | None = None
     provider_transport_id: Identifier | None = None
+    phase_id: Identifier | None = None
+    phase_action: Literal["begin", "end"] | None = None
+    phase_deadline_ns: Annotated[int | None, Field(strict=True, ge=0)] = None
 
     @model_validator(mode="after")
     def integrity(self) -> VoiceEvent:
@@ -349,6 +447,11 @@ class Attempt(Model):
     terminal_reason: str | None = None
     trial_id: Identifier | None = None
     owner_id: Identifier | None = None
+    session_id: Identifier | None = None
+    transport_turn_id: Identifier | None = None
+    connection_epoch: Epoch | None = None
+    response_epoch: Epoch | None = None
+    lineage_observation: Literal["recorded_at_reservation", "unknown"] = "unknown"
     dispatch_authorized: bool | None = None
     dispatched: bool | None = None
     started: bool | None = None

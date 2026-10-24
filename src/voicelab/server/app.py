@@ -23,14 +23,15 @@ from pydantic import TypeAdapter
 from voicelab.accounting.ledger import AttemptLedger, BUDGET_REFUSAL_CODES, BudgetRefused
 from voicelab.adapters import create_arm
 from voicelab.adapters.live import validate_live_config
+from voicelab.adapters.licensed import LABEL as K_EVIDENCE_LABEL, LicensedControlRefused, validate_k_config
 from voicelab.adapters.transport import ProviderFailure
 from voicelab.core.admission import admission_evidence
-from voicelab.contracts import Audio, ClientStatus, ClockProbe, Commit, End, Hash, Hello, Identifier, Interrupt, MAX_MESSAGE_BYTES, MockFaultControl, MockFaultPolicy, MockFaultReceipt, Ping, Rendered, Resume, ServerMessage, parse_client, serialize_server
+from voicelab.contracts import Audio, CalibrationControl, CalibrationReceipt, ClientStatus, ClockProbe, Commit, End, Hash, Hello, Identifier, Interrupt, MAX_MESSAGE_BYTES, MockFaultControl, MockFaultPolicy, MockFaultReceipt, Ping, Rendered, Resume, ServerMessage, parse_client, serialize_server
 from voicelab.core.faults import FaultRefused, MockFaultController
 from voicelab.core.journal import LifecycleJournal
 from voicelab.core.session import Admission, SessionState, SessionViolation
 from voicelab.core.retention import RetentionManifest, TrialRetention
-from voicelab.core.task import TaskAuthority
+from voicelab.core.task import TaskAuthority, TaskEvidenceUnavailable
 from voicelab.core.trace import TraceWriter, store_pcm
 from voicelab.core.snapshots import read_snapshot, save_snapshot
 from voicelab.security import SecurityRefused, safe_artifact_path, validate_boundary, validate_host, validate_nonce, validate_origin
@@ -69,6 +70,8 @@ def exception_code(exc: Exception) -> str:
         return exc.code
     if isinstance(exc, SecurityRefused):
         return "boundary_refused"
+    if isinstance(exc, LicensedControlRefused):
+        return exc.code
     if isinstance(exc, asyncio.TimeoutError):
         return "provider_timeout"
     if isinstance(exc, asyncio.QueueFull):
@@ -92,6 +95,7 @@ class Settings:
     run_id: str = "mock-local"
     run_manifest_hash: str | None = None
     mock_fault_policy: dict[str, Any] | None = None
+    k_control_config: dict[str, Any] | None = None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -106,16 +110,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     fault_policy = MockFaultPolicy.model_validate(settings.mock_fault_policy) if settings.mock_fault_policy is not None else None
     if fault_policy is not None and settings.mode != "mock":
         raise ValueError("mock_fault_controls_refused_in_live_mode")
+    if settings.k_control_config is not None and settings.mode != 'live':
+        raise ValueError('licensed_control_requires_explicit_live_mode')
     live_configs: dict[str, dict[str, Any]] = {}
     if settings.mode == "live":
-        if not settings.live_config or not settings.enabled_arms or any(arm not in {"V", "C"} for arm in settings.enabled_arms):
-            raise ValueError("live_gate_closed: explicit manifests and V/C arms required; live K control audio not supplied")
+        if not settings.enabled_arms or len(set(settings.enabled_arms)) != len(settings.enabled_arms) or any(arm not in {"V", "C", "K"} for arm in settings.enabled_arms):
+            raise ValueError("live_gate_closed: explicit configured arms required")
         for arm in settings.enabled_arms:
-            live_configs[arm] = validate_live_config(settings.live_config, arm)
-        if len({entry["budget_usd"] for entry in live_configs.values()}) != 1:
+            if arm != 'K' and not settings.live_config:
+                raise ValueError('live_gate_closed: explicit provider manifests required')
+            live_configs[arm] = (validate_k_config(settings.k_control_config) if arm == 'K'
+                                 else validate_live_config(settings.live_config, arm))
+        if (len({Decimal(entry["budget_usd"]) for entry in live_configs.values()}) != 1
+                or len({entry['run_id'] for entry in live_configs.values()}) != 1):
             raise ValueError("live_gate_closed: inconsistent run budget")
+        if 'K' in live_configs and settings.run_manifest_hash is None:
+            raise ValueError('licensed_control_run_manifest_pin_required')
     evidence_label = LIVE_EVIDENCE_LABEL if settings.mode == "live" else EVIDENCE_LABEL
-    retention_by_arm: dict[str, list[RetentionManifest]] = {"V": [], "C": []}
+    retention_by_arm: dict[str, list[RetentionManifest]] = {"V": [], "C": [], "K": []}
     trial_ids: set[str] = set()
     if settings.retention_manifests and settings.mode != "live":
         raise ValueError("live_synthetic_retention_assignments_require_live_mode")
@@ -211,13 +223,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if evidence is None:
             raise HTTPException(status_code=404, detail="unknown session")
         # SQLite lookup only; client ID never becomes a filesystem path.
-        authority = TaskAuthority(safe_artifact_path(settings.artifact_root, "task.sqlite3"))
+        authority = TaskAuthority(safe_artifact_path(settings.artifact_root, "task.sqlite3"), readonly=True)
         try:
             evidence["task_journal"] = authority.history(evidence["session"]["trial_id"])
+        except TaskEvidenceUnavailable:
+            evidence['task_journal'] = {'observation': 'unknown', 'reason': 'task_evidence_unavailable'}
         finally:
             authority.close()
         evidence["runtime_verified"] = False
-        for key, kind in (("ledger", "ledger_snapshot"), ("faults", "fault_controls")):
+        for key, kind in (("ledger", "ledger_snapshot"), ("faults", "fault_controls"), ('calibration', 'calibration_phases')):
             metadata = next((row for row in evidence["artifacts"] if row.get("kind") == kind), None)
             evidence[key] = None
             evidence[key + "_artifact"] = metadata or {"observation": "unknown", "reason": "terminal_snapshot_unavailable"}
@@ -230,7 +244,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if active is not None and active.faults is not None:
             evidence["active_fault_controls"] = active.faults.snapshot()
             evidence["active_fault_controls"]["adapter_counters"] = active.adapter.diagnostics()
+        snapshot = evidence.get('ledger')
+        rows = snapshot.get('attempts', []) if isinstance(snapshot, dict) else []
+        evidence['session_attempts'] = [row for row in rows
+            if row.get('lineage_observation') == 'recorded_at_reservation' and row.get('session_id') == session_id]
+        evidence['attempt_lineage'] = {'scope': 'exact_session_id_from_saved_run_snapshot_only',
+            'observation': 'saved_snapshot' if snapshot is not None else 'unknown',
+            'unresolved_attempt_ids': [row['attempt_id'] for row in rows
+                if row.get('lineage_observation') != 'recorded_at_reservation'],
+            'other_session_attempts_excluded': True, 'inferred_joins': False}
+        if active is not None:
+            evidence['calibration_phases'] = list(active.state.calibration_phases.values())
+        elif isinstance(evidence.get('calibration'), dict):
+            evidence['calibration_phases'] = evidence['calibration']['phases']
         return evidence
+
+    @app.post('/sessions/{session_id}/evidence')
+    async def browser_session_evidence(session_id: str, request: Request) -> dict[str, object]:
+        # Browser-generated Origin on same-origin POST; no forged Origin or CORS waiver.
+        authorize(request)
+        raw = bytearray()
+        try:
+            async with asyncio.timeout(2):
+                async for chunk in request.stream():
+                    if len(raw) + len(chunk) > 32:
+                        raise HTTPException(status_code=413, detail={'code': 'evidence_read_body_bound'})
+                    raw.extend(chunk)
+        except TimeoutError:
+            raise HTTPException(status_code=408, detail={'code': 'evidence_read_body_timeout'}) from None
+        if raw != b'{}':
+            raise HTTPException(status_code=400, detail={'code': 'evidence_read_empty_object_required'})
+        # Identical canonical reader and saved snapshot validation; no new counters/totals.
+        return await session_evidence(session_id, request)
+
+    @app.post('/sessions/{session_id}/calibration', response_model=CalibrationReceipt)
+    async def control_calibration(session_id: str, request: Request) -> dict[str, object]:
+        authorize(request)
+        raw = bytearray()
+        try:
+            async with asyncio.timeout(2):
+                async for chunk in request.stream():
+                    if len(raw) + len(chunk) > 512:
+                        raise HTTPException(status_code=413, detail={'code': 'calibration_control_bound'})
+                    raw.extend(chunk)
+        except TimeoutError:
+            raise HTTPException(status_code=408, detail={'code': 'calibration_control_timeout'}) from None
+        try:
+            control = CalibrationControl.model_validate_json(bytes(raw))
+        except ValueError:
+            raise HTTPException(status_code=400, detail={'code': 'calibration_control_invalid'}) from None
+        relay = sessions.get(session_id)
+        if relay is None or relay.state.closed:
+            raise HTTPException(status_code=409, detail={'code': 'calibration_session_unavailable'})
+        try:
+            receipt = relay.state.calibration(control.phase_id, control.action)
+        except SessionViolation:
+            raise HTTPException(status_code=409, detail={'code': 'calibration_phase_refused'}) from None
+        if not receipt['duplicate']:
+            relay.record('calibration_phase', phase_id=control.phase_id, phase_action=control.action,
+                phase_deadline_ns=receipt['deadline_ns'], reason='bounded local diagnostics phase; no capture or probe success asserted')
+        return {**receipt, 'session_id': session_id, 'run_id': relay.run_id,
+            'trial_id': relay.state.trial_namespace, 'boot_id': boot_id,
+            'task_deadlines_retained': True, 'captured_turn_created': False,
+            'probe_success': 'unknown', 'runtime_verified': False}
 
     @app.post("/sessions/{session_id}/faults", response_model=MockFaultReceipt)
     async def control_fault(session_id: str, request: Request) -> dict[str, object]:
@@ -358,7 +434,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 relay.state.state = "reconnecting"
                 relay.socket = socket
                 resumed = True
-                await relay.send("ready", {"mode": settings.mode, "arm": first.arm, "evidence_label": evidence_label, "trial_namespace": relay.state.trial_namespace, "resume_required": True, "run_id": relay.run_id, "trial_id": relay.state.trial_namespace, "boot_id": boot_id, "admission": relay.admission_metadata, "evidence_reference": f"/sessions/{relay.state.session_id}/evidence"})
+                await relay.send("ready", {"mode": settings.mode, "arm": first.arm, "evidence_label": relay.evidence_label, "trial_namespace": relay.state.trial_namespace, "resume_required": True, "run_id": relay.run_id, "trial_id": relay.state.trial_namespace, "boot_id": boot_id, "admission": relay.admission_metadata, "evidence_reference": f"/sessions/{relay.state.session_id}/evidence"})
             else:
                 identifier = "s-" + secrets.token_hex(12)
                 admission.admit(identifier)
@@ -427,8 +503,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             self.journal = journal
             self.retention = TrialRetention(retention_manifest)
             # Revalidate expiry and all manifests at admission, not only factory creation.
-            self.adapter_config = ({**validate_live_config(config.live_config, state.arm), "mode": "live"} if config.mode == "live" else {"mode": "mock"})
-            self.adapter_config.update(connection_epoch=0, response_epoch=0)
+            self.adapter_config = ((validate_k_config(config.k_control_config) if state.arm == 'K'
+                else validate_live_config(config.live_config, state.arm)) if config.mode == 'live' else {'mode': 'mock'})
+            self.adapter_config.update(connection_epoch=0, response_epoch=0, session_id=state.session_id,
+                run_manifest_hash=config.run_manifest_hash)
+            self.evidence_label = K_EVIDENCE_LABEL if config.mode == 'live' and state.arm == 'K' else evidence_label
             budget = Decimal(self.adapter_config["budget_usd"]) if config.mode == "live" else Decimal("0")
             self.run_id = run_id = self.adapter_config["run_id"] if config.mode == "live" else config.run_id
             self.faults = MockFaultController(fault_policy, {"session_id": state.session_id,
@@ -464,6 +543,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             self.watchdog: asyncio.Task | None = None
             self.turn_outcome = "task_failure"
             self.turn_terminal_written: set[str] = set()
+            self.control_render_complete = False
             self.current_transport_turn: str | None = None
             self.logical_response_starts: dict[str, int] = {}
             self.trace_integrity_failed = False
@@ -502,7 +582,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     logical_turn_id=self.active_logical_turn, transport_turn_id=self.current_transport_turn)
 
         async def open(self) -> None:
-            self.record("session_started", reason=evidence_label)
+            self.record("session_started", reason=self.evidence_label)
             self.state.state = "connecting"
             self.watchdog = asyncio.create_task(self.watch_deadlines())
             await asyncio.wait_for(self.adapter.open({"mode": self.settings.mode}), timeout=10)
@@ -513,9 +593,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             self.admission_metadata = admission_evidence(mode=self.settings.mode, run_id=self.run_id,
                 run_manifest_hash=self.settings.run_manifest_hash, owner_id=boot_id,
                 config=self.adapter_config if self.settings.mode == 'live' else None,
-                observed_models=getattr(self.adapter, 'observed_returned_models', {}))
+                observed_models=getattr(self.adapter, 'observed_returned_models', {}),
+                observed_control=getattr(self.adapter, 'observed_control', None))
             self.journal.admission(self.state.session_id, self.admission_metadata)
-            await self.send("ready", {"mode": self.settings.mode, "arm": self.state.arm, "evidence_label": evidence_label, "trial_namespace": self.state.trial_namespace, "run_id": self.run_id, "trial_id": self.state.trial_namespace, "boot_id": boot_id, "admission": self.admission_metadata, "evidence_reference": f"/sessions/{self.state.session_id}/evidence"})
+            await self.send("ready", {"mode": self.settings.mode, "arm": self.state.arm, "evidence_label": self.evidence_label, "trial_namespace": self.state.trial_namespace, "run_id": self.run_id, "trial_id": self.state.trial_namespace, "boot_id": boot_id, "admission": self.admission_metadata, "evidence_reference": f"/sessions/{self.state.session_id}/evidence"})
             await self.send("state", {"state": "listening"})
             self.sender = asyncio.create_task(self.pump())
 
@@ -533,11 +614,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return
             if self.journal.finish_turn(self.state.session_id, turn, outcome, reason):
                 self.turn_terminal_written.add(turn)
+                if outcome == 'control_complete' and reason == 'generation_complete_and_render_ack':
+                    self.control_render_complete = True
                 self.record("turn_ended", logical_turn_id=self.active_logical_turn, transport_turn_id=turn, terminal_outcome=outcome, outcome_source=source, reason=reason)
 
         def start_turn(self, transport: str) -> None:
             if self.current_transport_turn == transport:
                 return
+            self.control_render_complete = False
             self.current_transport_turn = transport
             self.active_logical_turn = self.recovery_logical_turn or transport
             self.journal.start_turn(self.state.session_id, transport, self.active_logical_turn, self.state.connection_epoch, self.state.response_epoch, time.monotonic_ns())
@@ -588,7 +672,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         await self.send("audio", {**event, "synthetic": self.settings.mode == "mock", "artifact_hash": artifact_hash, "content_hash": content_hash, "artifact_persisted": artifact_hash is not None})
                     elif kind == "task":
                         outcome = event.get("outcome", {})
-                        self.turn_outcome = "off_script" if outcome.get("lexical_miss") else ("success" if outcome.get("ok") is True else "task_failure")
+                        self.turn_outcome = ('control_complete' if outcome.get('control_only') is True else
+                            ("off_script" if outcome.get("lexical_miss") else ("success" if outcome.get("ok") is True else "task_failure")))
                         if outcome.get("effect_committed") and not outcome.get("duplicate"):
                             self.record_effect(outcome["logical_operation_id"])
                         await self.send("task", outcome)
@@ -688,6 +773,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         response_id=message.response_id, rendered_through_sample=message.rendered_through_sample)
                     return
                 self.state.rendered(message.response_id, message.rendered_through_sample)
+                if hasattr(self.adapter, 'acknowledge_rendered'):
+                    self.adapter.acknowledge_rendered(message.response_id, message.rendered_through_sample)
                 self.retention.acknowledge(message.response_id, message.rendered_through_sample)
                 self.record("rendered_ack", logical_turn_id=self.active_logical_turn, transport_turn_id=self.current_transport_turn, response_id=message.response_id, sample_offset=message.rendered_through_sample, sample_rate=24000)
                 if self.state.state == "listening":
@@ -703,10 +790,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     outcome = "transport_loss" if repeat else self.turn_outcome
                     if self.journal.finish_turn(self.state.session_id, old_turn, outcome, "reconnect_no_audio_replay"):
                         self.turn_terminal_written.add(old_turn)
+                        if not repeat and outcome == 'control_complete':
+                            self.control_render_complete = True
                         self.record("turn_ended", logical_turn_id=self.active_logical_turn, transport_turn_id=old_turn, terminal_outcome=outcome, outcome_source="relay", reason="reconnect_no_audio_replay")
                 if ack and ack.response_id == old_response and self.state.rendered_through_sample <= ack.rendered_through_sample <= self.state.response_samples:
                     self.retention.acknowledge(ack.response_id, ack.rendered_through_sample)
                 self.recovery_logical_turn = self.active_logical_turn if repeat else None
+                if repeat:
+                    self.control_render_complete = False
                 self.current_transport_turn = None
                 self.authority.set_epoch(self.state.trial_namespace, self.state.response_epoch)
                 await asyncio.wait_for(self.adapter.cancel(old_response, self.state.response_epoch, ack.rendered_through_sample if ack else 0), timeout=2)
@@ -756,6 +847,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await self.fail(exception_code(exc))
 
         async def detach(self) -> None:
+            if self.state.calibration_id is not None:
+                await self.shutdown('calibration_invalid', outcome='calibration_invalid', failed=True)
+                return
             if self.state.state in {"disconnected", "reconnecting"}:
                 # An unsuccessful reconnect does not reset the original five-second window.
                 self.state.state = "disconnected"
@@ -806,6 +900,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 task_outcome = self.authority.snapshot(self.state.trial_namespace)
             if outcome is None:
                 outcome = ("success" if task_outcome.get("state") in {"booked", "complete"} else "abandoned") if reason == "ended_by_user" else failure_outcome(reason)
+                if self.state.arm == 'K' and self.settings.mode == 'live' and reason == 'ended_by_user':
+                    outcome = ('control_complete' if self.control_render_complete
+                               else 'abandoned')
+            if self.state.arm == 'K' and self.settings.mode == 'live':
+                task_outcome = {**task_outcome, 'control_only': True, 'task_applicability': 'not_applicable',
+                    'spoken_correctness': 'unknown', 'intent_observation': 'unknown'}
             ledger_snapshot = None
             ledger_artifact: dict[str, object] = {"observation": "unknown", "reason": "ledger_snapshot_unavailable"}
             try:
@@ -820,6 +920,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ledger_snapshot = None
                 ledger_artifact = {"observation": "unknown", "reason": "ledger_snapshot_write_or_read_failure"}
             fault_artifact: dict[str, object] | None = None
+            calibration_artifact: dict[str, object]
+            try:
+                calibration_snapshot = {'schema_version': 1, 'session_id': self.state.session_id,
+                    'boot_id': boot_id, 'phases': list(self.state.calibration_phases.values()),
+                    'clock_domain': 'server_monotonic_ns', 'probe_success': 'unknown'}
+                calibration_artifact = save_snapshot(self.settings.artifact_root, self.state.session_id,
+                    'calibration_phases', calibration_snapshot)
+                self.journal.artifact(self.state.session_id, calibration_artifact['artifact_hash'], calibration_artifact)
+            except Exception:
+                calibration_artifact = {'observation': 'unknown', 'reason': 'calibration_snapshot_unavailable'}
             if self.faults is not None:
                 with suppress(Exception):
                     self.faults.finish(outcome)
@@ -859,7 +969,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 with suppress(Exception):
                     self.authority.close()
             with suppress(Exception):
-                await self.send("ended", {"reason": reason, "outcome": outcome, "outcome_source": source, "task": task_outcome, "trace_hash": trace_hash, "trace": trace_metadata, "lifecycle_persisted": journal_saved, "effect_fence": effect_fence, "ledger": ledger_snapshot, "ledger_artifact": ledger_artifact, "faults_artifact": fault_artifact, "retention": retention, "evidence_label": evidence_label, "evidence_reference": f"/sessions/{self.state.session_id}/evidence", "spoken_correctness": "unknown"})
+                await self.send("ended", {"reason": reason, "outcome": outcome, "outcome_source": source, "task": task_outcome, "trace_hash": trace_hash, "trace": trace_metadata, "lifecycle_persisted": journal_saved, "effect_fence": effect_fence, "ledger": ledger_snapshot, "ledger_artifact": ledger_artifact, "faults_artifact": fault_artifact, "calibration_artifact": calibration_artifact, "admission": self.admission_metadata, "retention": retention, "evidence_label": self.evidence_label, "evidence_reference": f"/sessions/{self.state.session_id}/evidence", "spoken_correctness": "unknown"})
             with suppress(Exception):
                 await self.socket.close(code=1000)
 

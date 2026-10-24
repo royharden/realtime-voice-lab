@@ -20,7 +20,8 @@ BUDGET_REFUSAL_CODES = frozenset({'ledger_budget_mismatch', 'ledger_admission_ha
     'component_attempt_limit', 'budget_exhausted', 'dispatch_requires_reserved_known_terms',
     'dispatch_owner_mismatch', 'dispatch_requires_active_authorization',
     'sent_without_dispatch_authorization', 'attempt_bound_enforcement_refused',
-    'synchronous_attempt_bound_verifier_required', 'run_price_terms_mismatch', 'budget_policy_refused'})
+    'synchronous_attempt_bound_verifier_required', 'run_price_terms_mismatch', 'budget_policy_refused',
+    'attempt_lineage_incomplete', 'attempt_lineage_invalid'})
 
 
 class BudgetRefused(ValueError):
@@ -108,6 +109,10 @@ class AttemptLedger:
                 db.execute('ALTER TABLE attempt_context ADD COLUMN trial_id TEXT')
             if 'sent_source' not in columns:
                 db.execute('ALTER TABLE attempt_context ADD COLUMN sent_source TEXT')
+            for name, sql_type in (('session_id', 'TEXT'), ('transport_turn_id', 'TEXT'),
+                                   ('connection_epoch', 'INTEGER'), ('response_epoch', 'INTEGER')):
+                if name not in columns:
+                    db.execute(f'ALTER TABLE attempt_context ADD COLUMN {name} {sql_type}')
             db.execute('BEGIN IMMEDIATE')
             old = db.execute("SELECT value FROM ledger_settings WHERE key='budget'").fetchone()
             if old and Decimal(old[0]) != self.budget:
@@ -184,7 +189,9 @@ class AttemptLedger:
 
     def reserve(self, attempt_id: str, *, amount: Decimal, logical_turn_id: str,
                 arm: str, component: str, price_version: str, basis: str,
-                terms: ReservationTerms | dict | None = None, trial_id: str | None = None) -> dict:
+                terms: ReservationTerms | dict | None = None, trial_id: str | None = None,
+                session_id: str | None = None, transport_turn_id: str | None = None,
+                connection_epoch: int | None = None, response_epoch: int | None = None) -> dict:
         amount = money(amount)
         TypeAdapter(Identifier).validate_python(attempt_id)
         TypeAdapter(Identifier).validate_python(logical_turn_id)
@@ -202,11 +209,26 @@ class AttemptLedger:
         encoded_terms = json.dumps(terms.model_dump(mode='json'), sort_keys=True, separators=(',', ':'), allow_nan=False)
         if trial_id is not None:
             TypeAdapter(Identifier).validate_python(trial_id)
-        if terms.mode == 'live' and (trial_id is None or self.owner_id is None):
+        lineage = (session_id, transport_turn_id, connection_epoch, response_epoch)
+        if any(value is not None for value in lineage):
+            if any(value is None for value in lineage) or trial_id is None:
+                raise BudgetRefused('attempt_lineage_incomplete')
+            TypeAdapter(Identifier).validate_python(session_id)
+            TypeAdapter(Identifier).validate_python(transport_turn_id)
+            if any(type(value) is not int or not 0 <= value <= 1000000 for value in (connection_epoch, response_epoch)):
+                raise BudgetRefused('attempt_lineage_invalid')
+        if terms.mode != 'mock' and (trial_id is None or self.owner_id is None or session_id is None):
             raise BudgetRefused('live_reservation_owner_and_trial_required')
         with self._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             self._guard(db)
+            if terms.mode == 'local_control':
+                fingerprint = hashlib.sha256(encoded_terms.encode('utf-8')).hexdigest()
+                key = 'terms.local_control.canned'
+                prior = db.execute('SELECT value FROM ledger_settings WHERE key=?', (key,)).fetchone()
+                if prior is not None and prior[0] != fingerprint:
+                    raise BudgetRefused('run_price_terms_mismatch')
+                db.execute('INSERT OR IGNORE INTO ledger_settings VALUES (?,?)', (key, fingerprint))
             if terms.mode == 'live':
                 fingerprint = hashlib.sha256(encoded_terms.encode('utf-8')).hexdigest()
                 key = 'terms.' + component
@@ -234,8 +256,10 @@ class AttemptLedger:
                        (attempt_id, logical_turn_id, arm, component, money_text(amount), price_version,
                         basis, 'reserved', None, None))
             db.execute('''INSERT INTO attempt_context
-                (attempt_id,terms_json,owner_id,authorized_ns,sent_ns,provider_request_id,trial_id)
-                VALUES (?,?,?,?,?,?,?)''', (attempt_id, encoded_terms, self.owner_id, None, None, None, trial_id))
+                (attempt_id,terms_json,owner_id,authorized_ns,sent_ns,provider_request_id,trial_id,
+                 session_id,transport_turn_id,connection_epoch,response_epoch)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)''', (attempt_id, encoded_terms, self.owner_id, None, None, None, trial_id,
+                    session_id, transport_turn_id, connection_epoch, response_epoch))
             self._event(db, attempt_id, 'reserved', {'amount': money_text(amount), 'basis': basis,
                 'price_version': price_version, 'owner_id': self.owner_id})
             return dict(db.execute('SELECT * FROM attempts WHERE attempt_id=?', (attempt_id,)).fetchone())
@@ -250,15 +274,17 @@ class AttemptLedger:
             if row is None or row['state'] != 'reserved' or entry is None:
                 raise BudgetRefused('dispatch_requires_reserved_known_terms')
             terms = ReservationTerms.model_validate_json(entry['terms_json'])
-            if terms.mode == 'live' and entry['owner_id'] != self.owner_id:
+            if terms.mode != 'mock' and entry['owner_id'] != self.owner_id:
                 raise BudgetRefused('dispatch_owner_mismatch')
             if entry['authorized_ns'] is None:
                 stamp = time.monotonic_ns()
                 db.execute('UPDATE attempt_context SET authorized_ns=? WHERE attempt_id=?', (stamp, attempt_id))
                 self._event(db, attempt_id, 'dispatch_authorized', {'server_ns': stamp,
                     'clock_domain': 'server_monotonic_ns', 'owner_id': self.owner_id,
-                    'boundary': 'before_transport_call' if terms.mode == 'live' else 'keyless_mock_component_start',
-                    'remote_charge': 'unknown' if terms.mode == 'live' else 'none_mock'})
+                    'boundary': 'before_transport_call' if terms.mode == 'live' else
+                        ('local_no_provider_component_start' if terms.mode == 'local_control' else 'keyless_mock_component_start'),
+                    'remote_charge': 'unknown' if terms.mode == 'live' else
+                        ('none_no_provider_component' if terms.mode == 'local_control' else 'none_mock')})
 
     def ensure_dispatch_allowed(self, attempt_id: str) -> None:
         with self._connect() as db:
@@ -268,7 +294,7 @@ class AttemptLedger:
                 LEFT JOIN attempt_context c USING(attempt_id) WHERE attempt_id=?''', (attempt_id,)).fetchone()
             if row is None or row['state'] != 'reserved' or row['authorized_ns'] is None:
                 raise BudgetRefused('dispatch_requires_active_authorization')
-            if ReservationTerms.model_validate_json(row['terms_json']).mode == 'live' and row['owner_id'] != self.owner_id:
+            if ReservationTerms.model_validate_json(row['terms_json']).mode != 'mock' and row['owner_id'] != self.owner_id:
                 raise BudgetRefused('dispatch_owner_mismatch')
 
     def record_sent(self, attempt_id: str, *, boundary: str = 'websocket_send_returned',
@@ -433,6 +459,11 @@ class AttemptLedger:
                     provider_request_id=details['provider_request_id'] if details is not None else None,
                     reservation_terms=json.loads(details['terms_json']) if details is not None else None)
                 row['transport_source'] = details['sent_source'] if details is not None else None
+                for name in ('session_id', 'transport_turn_id', 'connection_epoch', 'response_epoch'):
+                    row[name] = details[name] if details is not None else None
+                row['lineage_observation'] = ('recorded_at_reservation' if details is not None
+                    and all(details[name] is not None for name in ('session_id', 'trial_id',
+                        'transport_turn_id', 'connection_epoch', 'response_epoch')) else 'unknown')
             with localcontext() as context:
                 context.prec = 96
                 known = sum((Decimal(r['settled']) for r in rows if r['state'] == 'settled'), Decimal(0))
