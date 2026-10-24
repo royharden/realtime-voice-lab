@@ -78,7 +78,7 @@ def exception_code(exc: Exception) -> str:
         return "queue_overrun"
     if isinstance(exc, SessionViolation):
         return str(exc)
-    if isinstance(exc, ValueError) and str(exc) in {"provider_timeout", "provider_error", "provider_protocol_error", "trace_closed_or_overflow", "recovery_unknown"}:
+    if isinstance(exc, ValueError) and str(exc) in {"provider_timeout", "provider_error", "provider_protocol_error", "trace_closed_or_overflow", "recovery_unknown", "server_payload_contract_violation"}:
         return str(exc)
     return "adapter_failure"
 
@@ -557,8 +557,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if kind == "clock_pong":
                     payload = {**payload, "server_sent_ns": time.monotonic_ns()}
                 message = ServerMessage(type=kind, session_id=self.state.session_id, connection_epoch=self.state.connection_epoch, response_epoch=self.state.response_epoch, sequence=self.sequence, payload=payload)
+                # Closed registry check first: a refused payload consumes no wire sequence.
+                try:
+                    encoded = serialize_server(message)
+                except ValueError:
+                    # Rows recorded just before this send (audio_sent/transcript/provider_event) were not delivered.
+                    self.trace_integrity_failed = True
+                    with suppress(Exception):
+                        self.record("integrity_error", reason="server payload refused by closed registry; " + kind + " not delivered, any trace row recorded for it was not sent", observation="unknown")
+                    raise
                 self.sequence += 1
-                await asyncio.wait_for(self.socket.send_text(serialize_server(message)), timeout=2)
+                await asyncio.wait_for(self.socket.send_text(encoded), timeout=2)
 
         def record(self, kind: str, **fields: Any) -> None:
             try:

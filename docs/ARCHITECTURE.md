@@ -10,7 +10,9 @@ exact Origin, local launch nonce and strict protocol before session admission.
 human/tool-readable common-bound reference; it does not replace variant validation.
 
 All server frames use `{type,protocol_version,session_id,connection_epoch,
-response_epoch,sequence,payload}`. Client frames are flat discriminated variants.
+response_epoch,sequence,payload}`. Each type has one closed payload model in the
+`contracts.py` server payload registry, checked on the exact encoded frame before send.
+Client frames are flat discriminated variants.
 Identifiers contain letters, digits, `_` or `-`. Audio is base64 PCM16, mono
 24000 Hz, at most 4800 samples/frame. Ingress has exact per-turn sequences,
 15 seconds/turn, eight logical turns and 120 seconds/trial. Output backlog may not

@@ -355,5 +355,6 @@ unknown; no calibration or other workflow has been run in Dirty Mode.
 Session evidence.session_attempts is an exact-session projection of the saved
 run ledger, with reservation-time trial/logical/transport/epoch lineage. Old missing
 fields remain unknown; do not guess using matching transport names or whole-run
-snapshot totals. No typed comprehensive ServerMessage payload registry exists yet;
-that is a named unbuilt binding source gap, separate from these conditional sources.
+snapshot totals. The closed ServerMessage payload registry (contracts.py, see
+contracts/INTERFACES.md) is source only: no emission has been exercised against it,
+so a real frame that it refuses would end the session as protocol_error.

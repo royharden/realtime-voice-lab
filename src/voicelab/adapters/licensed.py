@@ -220,7 +220,7 @@ class LicensedKSession:
                 'control_only': True, 'model_stages': 'not_applicable',
                 'translation': 'identity_noop_no_duration'}, turn_id, epoch, connection)
         except BaseException:
-            self.ledger.mark_unknown(attempt, 'local_control_cancelled_or_failed')
+            self.ledger.mark_unknown(attempt, reason='local_control_cancelled_or_failed')
             raise
 
     def acknowledge_rendered(self, response_id, sample):

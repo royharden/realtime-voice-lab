@@ -272,11 +272,64 @@ matches from the saved canonical run ledger snapshot; attempt_lineage reports
 unresolved_attempt_ids and missing snapshot unknown. Totals/hash/ref remain the
 original single atomic ledger snapshot; active observations invent no terminal data.
 
-ServerMessage.payload is still dict[str,object]. No exhaustive authoritative server
-payload schema/export registry exists. Typed HTTP/K models above are canonical;
-complete generated websocket payload bindings require a separately dispatched source
-registry. JSON references/AST bindings do not execute custom validators or prove
-runtime parity. Dirty Mode leaves all runtime behavior unverified.
+## Server payload registry v1 (runtime unverified)
+
+`contracts.py` holds one closed payload model per ServerMessage variant the relay
+actually emits, enumerated from every `Relay.send` call site and the adapter events
+it forwards. `ServerMessageVariant` is the envelope union discriminated on `type`;
+`SERVER_MESSAGE_ADAPTER` validates it; `SERVER_PAYLOAD_REGISTRY_VERSION = 1`.
+`contracts/server-payloads-v1.json` is the variant-to-model source reference.
+
+| type | payload model | emitted by |
+| --- | --- | --- |
+| ready | ReadyPayload (admission: AdmissionEvidence; resume adds resume_required:true) | Relay.open, resume |
+| state | StatePayload (RelayState; interrupt adds fence_epoch and task) | relay state changes |
+| transcript | TranscriptPayload (adapter fields + source) | mock debug text, live provider transcript |
+| audio | AudioPayload (adapter fields + synthetic/artifact_hash/content_hash/artifact_persisted) | mock, live V/C, licensed K |
+| event | EventPayload, discriminated on `kind`: controller_span, mock_tool_attempt, response_done, cancel.ack, resume.ack, tts_request/tts_first_pcm, repeat_requested | adapters; repeat_requested from relay |
+| task | TaskPayload (authority outcome/snapshot, clarification, K control view) | adapter task events, resume snapshot |
+| error | ErrorPayload (code, TerminalOutcome, fixed message, terminal:true) | Relay.shutdown on failure |
+| ended | EndedPayload (task: TaskPayload or TaskUnknown; TraceSummary; LedgerSummary or null; Snapshot/UnknownArtifact; RetentionSummary; AdmissionEvidence) | Relay.shutdown |
+| pong | PongPayload | legacy ping |
+| clock_pong | ClockPongPayload | clock_probe |
+
+Adapter-originated payloads (transcript, audio, adapter events) keep the adapter
+envelope fields the relay already forwarded: `type`, `sequence` (adapter sequence,
+not the wire sequence), `connection_epoch`, `response_epoch` and, where present, `turn_id`
+(`AdapterEventFields`). `task` carries only the outcome object, not the adapter event.
+`mock_transport_drop` and `mock_provider_error` are consumed by the relay and never sent.
+
+`serialize_server` encodes the generic `ServerMessage` exactly as before, then
+validates those bytes against the registry; it never injects defaults, so emitted
+bytes are unchanged. Unknown types/fields/values refuse with the fixed code
+`server_payload_contract_violation`. Pydantic error text is not forwarded, because it
+could quote transcript or PCM. The relay maps that code to `protocol_error`, and a
+refused payload uses no wire sequence number. `parse_server` is the closed consumer
+parse. Existing readers that call `ServerMessage.model_validate` keep the generic
+envelope; nothing about them changes.
+
+Field names and existing values are unchanged. Closed value sets: TaskCode (every
+authority/live/K task code), RelayState, error/ended codes as `ServerCode` snake case,
+UnknownArtifact and RetentionSummary reasons. F1 (separate selection/confirmation
+turns), epoch fences, clock domains (server_monotonic_ns vs browser_performance_ms)
+and the K descriptive-control rule (`control_only` cannot claim ok/effect) are kept.
+The ready identity must agree with admission run/mode. Ended `ledger` is null exactly
+when its artifact is unknown. Ledger attempt/event rows remain raw canonical
+accounting rows (`dict`). The registry itself persists nothing. Existing relay
+persistence is unchanged: transcript text is wire-only; the relay stores PCM only as
+mock diagnostic tone or approved retention artifacts; the task `challenge` stays in
+the task journal and its evidence export. (Operator harness asset import is separate.)
+Trace/snapshot metadata stays closed (no nonce/auth/headers/text/transcripts/PCM).
+When a payload is refused while the trace is open, the relay first records an
+`integrity_error` trace row (observation unknown) and marks the trace incomplete,
+because a trace row written just before that send may not have been delivered.
+Exception: a refused final `ended` send happens after the trace and journal are closed.
+That refusal is not durably recorded; the client sees a normal close with no `ended`
+frame. Dump failures map to the same fixed refusal code.
+
+AST-generated browser bindings consume these classes as ordinary source models.
+Generated bindings and JSON references neither run custom validators nor prove
+runtime parity. Dirty Mode leaves every emission unexercised against the registry.
 
 Protected read-only `POST /sessions/{id}/evidence` accepts exactly the two UTF-8
 bytes `{}` (no fields, whitespace or alternate JSON values), with a32-byte transport

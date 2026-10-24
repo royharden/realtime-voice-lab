@@ -1,0 +1,41 @@
+{
+  "$id": "urn:voicelab:server-payloads:1",
+  "title": "Realtime Voice Lab server payload registry v1 reference",
+  "description": "Variant-to-model map for the closed ServerMessage payload registry. Canonical runtime validation is src/voicelab/contracts.py (SERVER_MESSAGE_ADAPTER over ServerMessageVariant); this file duplicates no field schema. Runtime unverified.",
+  "registry_version": 1,
+  "source": "src/voicelab/contracts.py",
+  "envelope_union": "ServerMessageVariant",
+  "envelope_discriminator": "type",
+  "envelope_base": "ServerEnvelope",
+  "variants": {
+    "ready": {"envelope": "ReadyMessage", "payload": "ReadyPayload"},
+    "state": {"envelope": "StateMessage", "payload": "StatePayload"},
+    "transcript": {"envelope": "TranscriptMessage", "payload": "TranscriptPayload"},
+    "audio": {"envelope": "AudioMessage", "payload": "AudioPayload"},
+    "event": {"envelope": "EventMessage", "payload": "EventPayload", "payload_discriminator": "kind",
+      "payload_variants": {
+        "controller_span": "ControllerSpanEvent",
+        "mock_tool_attempt": "MockToolAttemptEvent",
+        "response_done": "ResponseDoneEvent",
+        "cancel.ack": "CancelAckEvent",
+        "resume.ack": "ResumeAckEvent",
+        "tts_request": "TtsTimingEvent",
+        "tts_first_pcm": "TtsTimingEvent",
+        "repeat_requested": "RepeatRequestedEvent"
+      }},
+    "task": {"envelope": "TaskMessage", "payload": "TaskPayload"},
+    "error": {"envelope": "ErrorMessage", "payload": "ErrorPayload"},
+    "ended": {"envelope": "EndedMessage", "payload": "EndedPayload"},
+    "pong": {"envelope": "PongMessage", "payload": "PongPayload"},
+    "clock_pong": {"envelope": "ClockPongMessage", "payload": "ClockPongPayload"}
+  },
+  "never_sent_adapter_events": ["mock_transport_drop", "mock_provider_error"],
+  "refusal_code": "server_payload_contract_violation",
+  "custom_validators": {
+    "TaskPayload": "control_view_is_descriptive",
+    "ReadyPayload": "one_identity",
+    "AudioPayload": "persisted_reference",
+    "ControllerSpanEvent": "ordered_span",
+    "EndedPayload": "snapshot_reference"
+  }
+}

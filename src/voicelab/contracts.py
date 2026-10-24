@@ -390,7 +390,7 @@ class VoiceEvent(Model):
 
 
 class ServerMessage(Model):
-    """Envelope; payload type is explicit and all emissions use this serializer."""
+    """Generic envelope kept for existing readers; SERVER_MESSAGE_ADAPTER closes each payload."""
     type: Literal["ready", "state", "transcript", "audio", "event", "task", "error", "ended", "pong", "clock_pong"]
     protocol_version: Literal[1] = 1
     session_id: Identifier
@@ -401,7 +401,22 @@ class ServerMessage(Model):
 
 
 def serialize_server(message: ServerMessage) -> str:
-    return message.model_dump_json()
+    """Encode once, then validate those exact bytes against the closed variant registry.
+
+    Emitted bytes stay the existing envelope encoding; registry defaults are never injected.
+    Validation errors are not echoed: they could quote transcript text or PCM.
+    """
+    try:
+        encoded = message.model_dump_json()
+        SERVER_MESSAGE_ADAPTER.validate_json(encoded)
+    except ValueError:
+        raise ValueError("server_payload_contract_violation") from None
+    return encoded
+
+
+def parse_server(raw: str | bytes) -> ServerMessageVariant:
+    """Closed consumer-side parse; unknown variants, fields and payload shapes refuse."""
+    return SERVER_MESSAGE_ADAPTER.validate_json(raw)
 
 
 Hash = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
@@ -560,3 +575,418 @@ class EvidenceRecord(Model):
     custody_reference: str | None
     observation: Literal["observed", "estimated", "unknown"]
     unknown_reason: str | None
+
+
+# Server payload registry v1. One closed payload model per ServerMessage variant the
+# relay actually emits (server/app.py Relay.send call sites). Adapter-originated
+# payloads keep their adapter envelope fields (type/sequence/epochs/turn_id). Adapter
+# events consumed by the relay (mock_transport_drop, mock_provider_error) are never sent.
+# The registry persists nothing; existing PCM/task-journal persistence is unchanged and
+# trace/snapshot persistence keeps its own closed metadata.
+
+ServerCode = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,95}$")]
+ServerNs = Annotated[int, Field(strict=True, ge=0)]
+BrowserMs = Annotated[int | float, Field(ge=0, allow_inf_nan=False)]
+EvidenceLabel = Annotated[str, Field(min_length=1, max_length=500)]
+EvidenceReference = Annotated[str, Field(pattern=r"^/sessions/[A-Za-z0-9_-]{1,96}/evidence$", max_length=120)]
+BoundedReference = Annotated[str, Field(min_length=1, max_length=500)]
+CostText = Annotated[str, Field(pattern=r"^\d+(?:\.\d+)?$", max_length=200)]
+RelayState = Literal["connecting", "listening", "capturing", "awaiting_response", "playing", "calibrating", "disconnected", "reconnecting", "closed"]
+TaskState = Literal["information", "slots_offered", "slot_selected", "awaiting_confirmation", "booked", "complete"]
+TaskCode = Literal["logical_operation_conflict", "stale_epoch", "already_booked", "select_offered_slot", "explicit_current_confirmation_required", "mock_drop_before_effect", "clarification", "explicit_confirmation_required", "stale_confirmation_proposal", "licensed_fixed_control_no_intent_inference"]
+
+
+class TaskBooking(Model):
+    """TaskAuthority task_bookings row; the only durable booking effect."""
+    namespace: Annotated[str, Field(min_length=1, max_length=128)]
+    operation_id: Identifier
+    slot_id: Literal["slot-a", "slot-b"]
+    confirmation_turn: Identifier
+    epoch: Epoch
+    state_version: Annotated[int, Field(strict=True, ge=0)]
+
+
+class TaskPayload(Model):
+    """`task` payload and nested task views: authority outcome or snapshot, clarification, or K control view."""
+    ok: bool | None = None
+    logical_operation_id: Identifier | None = None
+    duplicate: bool | None = None
+    retryable_no_effect: bool | None = None
+    effect_committed: bool | None = None
+    code: TaskCode | None = None
+    status: Literal["clarification"] | None = None
+    message: Annotated[str | None, Field(max_length=500)] = None
+    lexical_miss: Literal[True] | None = None
+    hours: Annotated[str | None, Field(max_length=200)] = None
+    slots: list[Slot] | None = None
+    state: TaskState | None = None
+    state_version: Annotated[int | None, Field(strict=True, ge=0)] = None
+    slot_id: Literal["slot-a", "slot-b"] | None = None
+    challenge: Annotated[str | None, Field(max_length=128)] = None
+    response_epoch: Epoch | None = None
+    booking: TaskBooking | None = None
+    control_only: Literal[True] | None = None
+    task_applicability: Literal["not_applicable"] | None = None
+    spoken_correctness: Literal["unknown"] | None = None
+    intent_observation: Literal["unknown"] | None = None
+    asset_id: Identifier | None = None
+    catalog_hash: Hash | None = None
+
+    @model_validator(mode="after")
+    def control_view_is_descriptive(self) -> TaskPayload:
+        if self.control_only is True and (self.task_applicability != "not_applicable" or self.spoken_correctness != "unknown" or self.effect_committed is True or self.ok is True):
+            raise ValueError("control_task_view_cannot_claim_task_result")
+        return self
+
+
+class TaskUnknown(Model):
+    """Ended task view when the authority snapshot itself was unavailable."""
+    state: Literal["unknown"]
+    control_only: Literal[True] | None = None
+    task_applicability: Literal["not_applicable"] | None = None
+    spoken_correctness: Literal["unknown"] | None = None
+    intent_observation: Literal["unknown"] | None = None
+
+
+class ReadyPayload(Model):
+    mode: Literal["mock", "live"]
+    arm: Literal["V", "C", "K"]
+    evidence_label: EvidenceLabel
+    trial_namespace: Identifier
+    run_id: Identifier
+    trial_id: Identifier
+    boot_id: Identifier
+    admission: AdmissionEvidence
+    evidence_reference: EvidenceReference
+    resume_required: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def one_identity(self) -> ReadyPayload:
+        if self.trial_id != self.trial_namespace or self.admission.run_id != self.run_id or self.admission.mode != self.mode:
+            raise ValueError("ready_identity_mismatch")
+        return self
+
+
+class StatePayload(Model):
+    state: RelayState
+    fence_epoch: Epoch | None = None
+    task: TaskPayload | None = None
+
+
+class AdapterEventFields(Model):
+    """Adapter envelope fields the relay forwards unchanged inside adapter-originated payloads."""
+    sequence: Annotated[int, Field(strict=True, ge=0)]
+    connection_epoch: Epoch
+    response_epoch: Epoch
+    turn_id: Identifier | None = None
+
+
+class TranscriptPayload(AdapterEventFields):
+    type: Literal["transcript"]
+    turn_id: Identifier
+    text: Annotated[str, Field(max_length=8000)]
+    source: Literal["mock_debug_text", "provider_transcript_unverified"]
+    evidence_label: EvidenceLabel | None = None
+
+
+class AudioPayload(AdapterEventFields):
+    type: Literal["audio"]
+    turn_id: Identifier
+    response_id: Identifier
+    sample_rate: Literal[24000]
+    pcm16: Annotated[str, Field(min_length=4, max_length=12_800)]
+    evidence_label: EvidenceLabel | None = None
+    asset_id: Identifier | None = None
+    synthetic: bool
+    artifact_hash: Hash | None
+    content_hash: Hash
+    artifact_persisted: bool
+
+    @model_validator(mode="after")
+    def persisted_reference(self) -> AudioPayload:
+        if self.artifact_persisted != (self.artifact_hash is not None):
+            raise ValueError("audio_artifact_persistence_mismatch")
+        return self
+
+
+class ControllerSpanEvent(AdapterEventFields):
+    type: Literal["event"]
+    kind: Literal["controller_span"]
+    turn_id: Identifier
+    start_ns: ServerNs
+    end_ns: ServerNs
+    clock_domain: Literal["server_monotonic_ns"]
+    translation: Literal["identity_noop"]
+    mock_native_reasoning: bool | None = None
+
+    @model_validator(mode="after")
+    def ordered_span(self) -> ControllerSpanEvent:
+        if self.end_ns < self.start_ns:
+            raise ValueError("invalid_controller_span")
+        return self
+
+
+class MockToolAttemptEvent(AdapterEventFields):
+    type: Literal["event"]
+    kind: Literal["mock_tool_attempt"]
+    turn_id: Identifier
+    provider_tool_id: Identifier
+    provider_transport_id: Identifier
+    logical_operation_id: Identifier
+    duplicate: bool
+    effect_committed: bool
+
+
+class ResponseDoneEvent(AdapterEventFields):
+    type: Literal["event"]
+    kind: Literal["response_done"]
+    turn_id: Identifier
+    response_id: Identifier
+    spoken_correctness: Literal["unknown"] | None = None
+    control_only: Literal[True] | None = None
+    model_stages: Literal["not_applicable"] | None = None
+    translation: Literal["identity_noop_no_duration"] | None = None
+
+
+class CancelAckEvent(AdapterEventFields):
+    type: Literal["event"]
+    kind: Literal["cancel.ack"]
+    response_id: Identifier | None
+    rendered_cutoff: Annotated[int | None, Field(strict=True, ge=0)]
+    history_method: Literal["mock_no_provider_history"]
+
+
+class ResumeAckEvent(AdapterEventFields):
+    type: Literal["event"]
+    kind: Literal["resume.ack"]
+    rendered_ack: Rendered | None
+    audio_replayed: Literal[False]
+    reason: Annotated[str, Field(max_length=500)]
+
+
+class TtsTimingEvent(AdapterEventFields):
+    type: Literal["event"]
+    kind: Literal["tts_request", "tts_first_pcm"]
+    turn_id: Identifier
+    timestamp_ns: ServerNs
+    clock_domain: Literal["server_monotonic_ns"]
+
+
+class RepeatRequestedEvent(Model):
+    """Relay-originated; it carries no adapter envelope fields."""
+    kind: Literal["repeat_requested"]
+    message: Literal["Please repeat your last request; any booking remains recorded."]
+    audio_replayed: Literal[False]
+
+
+EventPayload = Annotated[Union[ControllerSpanEvent, MockToolAttemptEvent, ResponseDoneEvent, CancelAckEvent, ResumeAckEvent, TtsTimingEvent, RepeatRequestedEvent], Field(discriminator="kind")]
+
+
+class ErrorPayload(Model):
+    code: ServerCode
+    outcome: TerminalOutcome
+    message: Literal["Session ended; inspect the labeled trace and task journal."]
+    terminal: Literal[True]
+
+
+class PongPayload(Model):
+    """Legacy ping echo; no one-way delay or mixed-clock subtraction."""
+    sequence: Annotated[int, Field(strict=True, ge=0, le=19)]
+    browser_ms: BrowserMs
+    server_receive_ns: ServerNs
+    server_send_ns: ServerNs
+    clock_domain: Literal["server_monotonic_ns"]
+    one_way_delay_known: Literal[False]
+
+
+class ClockPongPayload(Model):
+    probe_id: Identifier
+    browser_sent_ms: BrowserMs
+    server_received_ns: ServerNs
+    server_sent_ns: ServerNs
+    clock_domain: Literal["server_monotonic_ns"]
+    browser_clock_domain: Literal["browser_performance_ms"]
+    boot_id: Identifier
+    probe_count: Annotated[int, Field(strict=True, ge=1, le=20)]
+    probe_limit: Literal[20]
+    server_receive_boundary: Literal["validated_clock_probe_handler"]
+    server_send_boundary: Literal["relay_send_dispatch"]
+    one_way_delay_known: Literal[False]
+
+
+class TraceSummary(Model):
+    """TraceWriter.metadata() plus relay integrity flag; metadata only."""
+    trace_hash: Hash | None
+    event_count: Annotated[int, Field(strict=True, ge=0)]
+    terminal_present: bool
+    clock_domain: Literal["server_monotonic_ns"]
+    terminal_fsynced: bool
+    boot_id: Identifier
+    run_id: Identifier
+    trial_id: Identifier
+    session_id: Identifier
+    arm: Literal["V", "C", "K"]
+    trace_reference: Annotated[str, Field(pattern=r"^traces/[A-Za-z0-9_-]{1,96}\.jsonl$")]
+    integrity_error: bool
+
+
+class SnapshotArtifact(Model):
+    """save_snapshot() metadata; ledger snapshots add run scope and capture clock."""
+    kind: Literal["ledger_snapshot", "fault_controls", "calibration_phases"]
+    artifact_hash: Hash
+    artifact_reference: BoundedReference
+    bytes: Annotated[int, Field(strict=True, ge=1, le=32_000_000)]
+    encoding: Literal["canonical_json_utf8_sorted_compact_newline"]
+    json_ensure_ascii: Literal[True]
+    observation: Literal["observed"]
+    scope: Literal["run_ledger_snapshot"] | None = None
+    run_id: Identifier | None = None
+    captured_for_session_id: Identifier | None = None
+    boot_id: Identifier | None = None
+    server_timestamp_ns: ServerNs | None = None
+    clock_domain: Literal["server_monotonic_ns"] | None = None
+
+
+class UnknownArtifact(Model):
+    observation: Literal["unknown"]
+    reason: Literal["ledger_snapshot_unavailable", "ledger_snapshot_write_or_read_failure", "fault_receipts_snapshot_unavailable", "calibration_snapshot_unavailable"]
+
+
+class LedgerSummary(Model):
+    """AttemptLedger.summary() top level. Rows stay the canonical raw ledger rows, typed by accounting."""
+    budget: CostText
+    known_cost: CostText
+    unknown_count: Annotated[int, Field(strict=True, ge=0)]
+    unknown_exposure: CostText
+    complete: bool
+    total_exposure: CostText
+    attempts: list[dict[str, object]]
+    events: list[dict[str, object]]
+    admission_halted: Annotated[str | None, Field(max_length=200)]
+    currency: Literal["USD"]
+    bound_violation_count: Annotated[int, Field(strict=True, ge=0)]
+    bound_integrity: Literal["invalid", "not_disproved"]
+    bound_violation_attempt_count: Annotated[int, Field(strict=True, ge=0)]
+    dispatch_halt_active: bool
+    dispatch_allowed: Literal[False] | None
+    owner_id: Annotated[str | None, Field(max_length=200)]
+    snapshot_owner_id: Annotated[str | None, Field(max_length=200)]
+    price_policy_fingerprints: dict[str, str]
+    total_exposure_definition: Literal["immutable known settlements plus reserved/unknown exposure; late usage evidence is not a reconciliation"]
+
+
+class RetentionSummary(Model):
+    """TrialRetention.finalize() result or its write-failure stand-in; hashes/references only, never PCM."""
+    input_persisted: bool | Literal["unknown"]
+    output_persisted: bool | Literal["unknown"]
+    reason: Literal["no_synthetic_retention_manifest", "synthetic_input_mismatch_or_approval_expired", "exact_approved_synthetic_trial_input", "retention_write_failure; inspect approved artifact directory"]
+    schema_version: Literal[1] | None = None
+    run_id: Identifier | None = None
+    trial_id: Identifier | None = None
+    fixture_id: Identifier | None = None
+    session_id: Identifier | None = None
+    input_content_hash: Hash | None = None
+    input_artifact_hash: Hash | None = None
+    output_artifact_hash: Hash | None = None
+    output_boundary: Literal["client_rendered_ack_pcm_prefixes"] | None = None
+    sample_rate: Literal[24000] | None = None
+    channels: Literal[1] | None = None
+    encoding: Literal["signed_little_endian_pcm16"] | None = None
+    approval_reference: BoundedReference | None = None
+    input_rights_reference: BoundedReference | None = None
+    # Manifest parse accepts "" here when output is not retained, and bounds no expiry length.
+    output_rights_reference: Annotated[str | None, Field(max_length=500)] = None
+    manifest_reference: BoundedReference | None = None
+    retention_until_utc: str | None = None
+    custody_reference: BoundedReference | None = None
+    policy: Literal["operator_custody_expiry"] | None = None
+
+
+class EndedPayload(Model):
+    reason: ServerCode
+    outcome: TerminalOutcome
+    outcome_source: Literal["relay", "client_report", "mock_fault_simulation"]
+    task: TaskPayload | TaskUnknown
+    trace_hash: Hash | None
+    trace: TraceSummary
+    lifecycle_persisted: bool
+    effect_fence: Literal["applied", "unknown"]
+    ledger: LedgerSummary | None
+    ledger_artifact: SnapshotArtifact | UnknownArtifact
+    faults_artifact: SnapshotArtifact | UnknownArtifact | None
+    calibration_artifact: SnapshotArtifact | UnknownArtifact
+    admission: AdmissionEvidence
+    retention: RetentionSummary
+    evidence_label: EvidenceLabel
+    evidence_reference: EvidenceReference
+    spoken_correctness: Literal["unknown"]
+
+    @model_validator(mode="after")
+    def snapshot_reference(self) -> EndedPayload:
+        if (self.ledger is None) != (self.ledger_artifact.observation == "unknown"):
+            raise ValueError("ended_ledger_snapshot_reference_mismatch")
+        return self
+
+
+class ServerEnvelope(Model):
+    protocol_version: Literal[1] = 1
+    session_id: Identifier
+    connection_epoch: Epoch
+    response_epoch: Epoch
+    sequence: Annotated[int, Field(strict=True, ge=0)]
+
+
+class ReadyMessage(ServerEnvelope):
+    type: Literal["ready"]
+    payload: ReadyPayload
+
+
+class StateMessage(ServerEnvelope):
+    type: Literal["state"]
+    payload: StatePayload
+
+
+class TranscriptMessage(ServerEnvelope):
+    type: Literal["transcript"]
+    payload: TranscriptPayload
+
+
+class AudioMessage(ServerEnvelope):
+    type: Literal["audio"]
+    payload: AudioPayload
+
+
+class EventMessage(ServerEnvelope):
+    type: Literal["event"]
+    payload: EventPayload
+
+
+class TaskMessage(ServerEnvelope):
+    type: Literal["task"]
+    payload: TaskPayload
+
+
+class ErrorMessage(ServerEnvelope):
+    type: Literal["error"]
+    payload: ErrorPayload
+
+
+class EndedMessage(ServerEnvelope):
+    type: Literal["ended"]
+    payload: EndedPayload
+
+
+class PongMessage(ServerEnvelope):
+    type: Literal["pong"]
+    payload: PongPayload
+
+
+class ClockPongMessage(ServerEnvelope):
+    type: Literal["clock_pong"]
+    payload: ClockPongPayload
+
+
+# Closed registry: the envelope type is the discriminator; an unknown type refuses.
+ServerMessageVariant = Annotated[Union[ReadyMessage, StateMessage, TranscriptMessage, AudioMessage, EventMessage, TaskMessage, ErrorMessage, EndedMessage, PongMessage, ClockPongMessage], Field(discriminator="type")]
+SERVER_MESSAGE_ADAPTER = TypeAdapter(ServerMessageVariant)
+SERVER_PAYLOAD_REGISTRY_VERSION = 1
