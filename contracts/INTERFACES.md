@@ -340,3 +340,45 @@ provider call or origin/CORS relaxation. Browser consumers use same-origin POST 
 browser-generated Origin, never attempt to forge the forbidden Origin header.
 Invalid body/bound/timeout yields fixed400/413/408 codes, respectively
 evidence_read_empty_object_required/evidence_read_body_bound/evidence_read_body_timeout.
+
+## HTTP response registry v1 (runtime unverified)
+
+`contracts.py` holds one closed body model per route outcome.
+`HTTP_RESPONSE_MODELS` maps a route key to its model, `HTTP_RESPONSE_REGISTRY_VERSION = 1`,
+and `contracts/http-responses-v1.json` is the route-to-model source reference.
+
+| route | success body | notes |
+| --- | --- | --- |
+| GET /health | HealthResponse | unauthenticated; mode/protocol/live_admission/evidence_label |
+| GET /admission | AdmissionResponse (`arms`: configured arm subset to AdmissionEvidence; all three in mock) | protected |
+| GET /diagnostics | DiagnosticsResponse (five DiagnosticMetric entries; observed ⇔ value present) | protected |
+| GET and POST /sessions/{id}/evidence | SessionEvidenceResponse | protected; one canonical reader; POST body exactly `{}` |
+| POST /sessions/{id}/calibration | CalibrationReceipt | already FastAPI response_model |
+| POST /sessions/{id}/faults | MockFaultReceipt | already FastAPI response_model |
+| GET /sessions/{id}/trace | not JSON: NDJSON bytes plus X-Voicelab-Trace-SHA256 / X-Voicelab-Trace-Complete | unchanged |
+| every refusal (403/404/405/408/409/413/400/422/500/503) | HttpErrorBody `{detail:{code},error:{code}}` | identical code, pattern `^[A-Za-z0-9_]{1,96}$` |
+
+Routes return their existing dicts unchanged. `checked(route, body)` validates a JSON
+encoding of that same value (`validate_http_response`), so emitted bytes do not change.
+A mismatch becomes a fixed 500 `http_response_contract_violation`, with no validation
+text. Refusal bodies are built by `http_error_body`: a code outside the pattern
+degrades to `internal_error`. The existing handler already turns non-code details
+(such as `unknown session` and other phrases with spaces, and Starlette's Not Found)
+into `request_refused`, and that is unchanged. Host/Origin/nonce, the exact `{}`
+evidence body and the 32/512-byte and 2s bounds are untouched.
+
+SessionEvidenceResponse closes the export: session row (`trace_complete` remains the
+stored SQLite 0/1 integer), turns, artifacts (discriminated on `kind`: diagnostic tone,
+saved snapshot, retention reference; each with content_hash), admission or null, task
+journal (TaskHistory or `{observation:unknown,reason:task_evidence_unavailable}`),
+LedgerSummary/FaultSnapshot/CalibrationSnapshot each null exactly when its artifact
+reference is unknown (EvidenceMissingArtifact `terminal_snapshot_unavailable`, or
+EvidenceUnreadableArtifact `saved_snapshot_missing_or_hash_invalid`, or
+`saved_snapshot_schema_unrecognized` when hash-valid bytes predate the current model, as
+older ledger snapshots do), optional
+active_fault_controls/calibration_phases, raw session_attempts ledger rows and
+AttemptLineage. Session identity and trace_reference must agree. Task operation
+arguments keep closed keys (`slot_id/challenge/state_version`); their values stay
+unknown provider proposals. The evidence export already includes the task
+`challenge`, task arguments and approved retention references. It never includes
+nonce/auth/headers/transcripts/PCM, and this registry adds no field.

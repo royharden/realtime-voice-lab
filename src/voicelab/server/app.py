@@ -26,7 +26,7 @@ from voicelab.adapters.live import validate_live_config
 from voicelab.adapters.licensed import LABEL as K_EVIDENCE_LABEL, LicensedControlRefused, validate_k_config
 from voicelab.adapters.transport import ProviderFailure
 from voicelab.core.admission import admission_evidence
-from voicelab.contracts import Audio, CalibrationControl, CalibrationReceipt, ClientStatus, ClockProbe, Commit, End, Hash, Hello, Identifier, Interrupt, MAX_MESSAGE_BYTES, MockFaultControl, MockFaultPolicy, MockFaultReceipt, Ping, Rendered, Resume, ServerMessage, parse_client, serialize_server
+from voicelab.contracts import Audio, CalibrationControl, CalibrationReceipt, ClientStatus, ClockProbe, Commit, End, Hash, Hello, Identifier, Interrupt, MAX_MESSAGE_BYTES, MockFaultControl, MockFaultPolicy, MockFaultReceipt, Ping, Rendered, Resume, ServerMessage, http_error_body, parse_client, serialize_server, snapshot_matches, validate_http_response
 from voicelab.core.faults import FaultRefused, MockFaultController
 from voicelab.core.journal import LifecycleJournal
 from voicelab.core.session import Admission, SessionState, SessionViolation
@@ -175,7 +175,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise SecurityRefused('ambiguous_boundary_headers')
             validate_host(request.headers.get('host', ''))
         except ValueError:
-            return JSONResponse(status_code=403, content={'detail': {'code': 'boundary_refused'}, 'error': {'code': 'boundary_refused'}})
+            return JSONResponse(status_code=403, content=http_error_body('boundary_refused'))
         return await call_next(request)
 
     @app.exception_handler(StarletteHTTPException)
@@ -185,15 +185,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         code = detail.get('code') if isinstance(detail, dict) else detail
         if not isinstance(code, str) or not code.isascii() or not code.replace('_', '').isalnum() or len(code) > 96 or ' ' in code:
             code = 'request_refused'
-        return JSONResponse(status_code=exc.status_code, content={'detail': {'code': code}, 'error': {'code': code}})
+        return JSONResponse(status_code=exc.status_code, content=http_error_body(code))
 
     @app.exception_handler(RequestValidationError)
     async def fixed_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-        return JSONResponse(status_code=422, content={'detail': {'code': 'invalid_request'}, 'error': {'code': 'invalid_request'}})
+        return JSONResponse(status_code=422, content=http_error_body('invalid_request'))
 
     @app.exception_handler(Exception)
     async def fixed_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-        return JSONResponse(status_code=500, content={'detail': {'code': 'internal_error'}, 'error': {'code': 'internal_error'}})
+        return JSONResponse(status_code=500, content=http_error_body('internal_error'))
+
+    def checked(route: str, body: dict[str, object]) -> dict[str, object]:
+        # Closed HTTP registry: the same value is returned; a mismatch is a fixed 500, never echoed.
+        try:
+            validate_http_response(route, body)
+        except ValueError:
+            raise HTTPException(status_code=500, detail={'code': 'http_response_contract_violation'}) from None
+        return body
 
     def authorize(request: Request) -> None:
         try:
@@ -207,12 +215,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def configured_admission(request: Request) -> dict[str, object]:
         authorize(request)
         arms = live_configs if settings.mode == 'live' else {'V': None, 'C': None, 'K': None}
-        return {'schema_version': 1, 'mode': settings.mode, 'arms': {
+        return checked('admission', {'schema_version': 1, 'mode': settings.mode, 'arms': {
             arm: admission_evidence(mode=settings.mode,
                 run_id=config['run_id'] if config else settings.run_id,
                 run_manifest_hash=settings.run_manifest_hash, owner_id=boot_id, config=config)
             for arm, config in arms.items()},
-            'observation_scope': 'configuration_only_no_provider_probe', 'runtime_verified': False}
+            'observation_scope': 'configuration_only_no_provider_probe', 'runtime_verified': False})
 
     @app.get("/sessions/{session_id}/evidence")
     async def session_evidence(session_id: str, request: Request) -> dict[str, object]:
@@ -237,9 +245,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             evidence[key + "_artifact"] = metadata or {"observation": "unknown", "reason": "terminal_snapshot_unavailable"}
             if metadata is not None:
                 try:
-                    evidence[key] = read_snapshot(settings.artifact_root, metadata)
+                    saved = read_snapshot(settings.artifact_root, metadata)
                 except (OSError, ValueError, KeyError):
                     evidence[key + "_artifact"] = {**metadata, "observation": "unknown", "reason": "saved_snapshot_missing_or_hash_invalid"}
+                else:
+                    # Hash-valid bytes in an older/unrecognized shape stay unknown rather than failing the export.
+                    if snapshot_matches(kind, saved):
+                        evidence[key] = saved
+                    else:
+                        evidence[key + "_artifact"] = {**metadata, "observation": "unknown", "reason": "saved_snapshot_schema_unrecognized"}
         active = sessions.get(session_id)
         if active is not None and active.faults is not None:
             evidence["active_fault_controls"] = active.faults.snapshot()
@@ -257,7 +271,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             evidence['calibration_phases'] = list(active.state.calibration_phases.values())
         elif isinstance(evidence.get('calibration'), dict):
             evidence['calibration_phases'] = evidence['calibration']['phases']
-        return evidence
+        return checked('session_evidence', evidence)
 
     @app.post('/sessions/{session_id}/evidence')
     async def browser_session_evidence(session_id: str, request: Request) -> dict[str, object]:
@@ -375,7 +389,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, object]:
-        return {"mode": settings.mode, "protocol_version": 1, "live_admission": settings.mode == "live", "runtime_verified": False, "evidence_label": evidence_label}
+        return checked("health", {"mode": settings.mode, "protocol_version": 1, "live_admission": settings.mode == "live", "runtime_verified": False, "evidence_label": evidence_label})
 
     @app.get("/diagnostics")
     async def diagnostics(request: Request) -> dict[str, object]:
@@ -400,7 +414,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expected = loop.time() + 0.01
         await asyncio.sleep(0.01)
         metrics["event_loop_lag_ms"] = {"value": max(0.0, (loop.time() - expected) * 1000), "observation": "observed", "unit": "milliseconds", "reason": "single 10ms scheduled-yield wake delay; diagnostic sample"}
-        return {"scope": "own_server_process_only", "boot_id": boot_id, "clock_domain": "server_monotonic_ns", "timestamp_ns": time.monotonic_ns(), "metrics": metrics, "admitted_sessions": len(admission.sessions)}
+        return checked("diagnostics", {"scope": "own_server_process_only", "boot_id": boot_id, "clock_domain": "server_monotonic_ns", "timestamp_ns": time.monotonic_ns(), "metrics": metrics, "admitted_sessions": len(admission.sessions)})
 
     @app.websocket("/ws")
     async def websocket(socket: WebSocket) -> None:

@@ -1,0 +1,34 @@
+{
+  "$id": "urn:voicelab:http-responses:1",
+  "title": "Realtime Voice Lab HTTP response registry v1 reference",
+  "description": "Route-to-model map for closed HTTP response bodies. Canonical validation is src/voicelab/contracts.py (HTTP_RESPONSE_MODELS / validate_http_response; FastAPI response_model for calibration and faults); this file duplicates no field schema. Runtime unverified.",
+  "registry_version": 1,
+  "source": "src/voicelab/contracts.py",
+  "routes": {
+    "GET /health": {"route_key": "health", "status": 200, "body": "HealthResponse", "boundary": "none"},
+    "GET /admission": {"route_key": "admission", "status": 200, "body": "AdmissionResponse", "boundary": "host_origin_nonce"},
+    "GET /diagnostics": {"route_key": "diagnostics", "status": 200, "body": "DiagnosticsResponse", "boundary": "host_origin_nonce"},
+    "GET /sessions/{session_id}/evidence": {"route_key": "session_evidence", "status": 200, "body": "SessionEvidenceResponse", "boundary": "host_origin_nonce"},
+    "POST /sessions/{session_id}/evidence": {"route_key": "session_evidence", "status": 200, "body": "SessionEvidenceResponse", "boundary": "host_origin_nonce", "request_body": "exact two bytes {}"},
+    "POST /sessions/{session_id}/calibration": {"status": 200, "body": "CalibrationReceipt", "boundary": "host_origin_nonce", "validation": "fastapi_response_model"},
+    "POST /sessions/{session_id}/faults": {"status": 200, "body": "MockFaultReceipt", "boundary": "host_origin_nonce", "validation": "fastapi_response_model"},
+    "GET /sessions/{session_id}/trace": {"status": 200, "body": null, "media_type": "application/x-ndjson", "headers": ["X-Voicelab-Trace-SHA256", "X-Voicelab-Trace-Complete"], "boundary": "host_origin_nonce"}
+  },
+  "error_body": "HttpErrorBody",
+  "error_code_pattern": "^[A-Za-z0-9_]{1,96}$",
+  "error_code_fallbacks": {"non_code_detail": "request_refused", "invalid_code": "internal_error"},
+  "contract_violation_code": "http_response_contract_violation",
+  "evidence_artifact_union": {"discriminator": "kind", "members": {
+    "diagnostic_output_tone": "EvidenceToneArtifact",
+    "ledger_snapshot": "EvidenceSnapshotArtifact",
+    "fault_controls": "EvidenceSnapshotArtifact",
+    "calibration_phases": "EvidenceSnapshotArtifact",
+    "input_artifact_hash": "EvidenceRetentionArtifact",
+    "output_artifact_hash": "EvidenceRetentionArtifact"
+  }},
+  "custom_validators": {
+    "HttpErrorBody": "one_code",
+    "DiagnosticMetric": "observed_value",
+    "SessionEvidenceResponse": "one_session"
+  }
+}

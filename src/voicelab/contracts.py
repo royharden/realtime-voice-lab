@@ -7,6 +7,7 @@ from decimal import Decimal, localcontext
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic_core import to_json
 
 PROTOCOL_VERSION = 1
 SAMPLE_RATE = 24_000
@@ -990,3 +991,307 @@ class ClockPongMessage(ServerEnvelope):
 ServerMessageVariant = Annotated[Union[ReadyMessage, StateMessage, TranscriptMessage, AudioMessage, EventMessage, TaskMessage, ErrorMessage, EndedMessage, PongMessage, ClockPongMessage], Field(discriminator="type")]
 SERVER_MESSAGE_ADAPTER = TypeAdapter(ServerMessageVariant)
 SERVER_PAYLOAD_REGISTRY_VERSION = 1
+
+
+# HTTP response registry v1. One closed body model per server/app.py route outcome.
+# Routes keep returning their existing dicts; validate_http_response checks a JSON
+# encoding of that same value and never replaces it, so emitted bytes are unchanged.
+# /calibration and /faults already serialize through response_model
+# (CalibrationReceipt, MockFaultReceipt). A /trace success is NDJSON, not a JSON body.
+
+HttpCode = Annotated[str, Field(pattern=r"^[A-Za-z0-9_]{1,96}$")]
+HttpRoute = Literal["health", "admission", "diagnostics", "session_evidence"]
+TaskCommand = Literal["get_hours", "list_slots", "select_slot", "confirm_slot", "get_status"]
+SqliteFlag = Literal[0, 1]
+
+
+class HttpErrorCode(Model):
+    code: HttpCode
+
+
+class HttpErrorBody(Model):
+    """Every refusal: fixed code twice, never echoed request/validation text."""
+    detail: HttpErrorCode
+    error: HttpErrorCode
+
+    @model_validator(mode="after")
+    def one_code(self) -> HttpErrorBody:
+        if self.detail.code != self.error.code:
+            raise ValueError("http_error_code_mismatch")
+        return self
+
+
+class HealthResponse(Model):
+    mode: Literal["mock", "live"]
+    protocol_version: Literal[1]
+    live_admission: bool
+    runtime_verified: Literal[False]
+    evidence_label: EvidenceLabel
+
+
+class AdmissionResponse(Model):
+    schema_version: Literal[1]
+    mode: Literal["mock", "live"]
+    arms: dict[Literal["V", "C", "K"], AdmissionEvidence]
+    observation_scope: Literal["configuration_only_no_provider_probe"]
+    runtime_verified: Literal[False]
+
+
+class DiagnosticMetric(Model):
+    value: int | float | None
+    observation: Literal["observed", "unknown"]
+    unit: Literal["bytes", "count", "milliseconds"]
+    reason: Annotated[str | None, Field(max_length=200)] = None
+
+    @model_validator(mode="after")
+    def observed_value(self) -> DiagnosticMetric:
+        if (self.observation == "observed") != (self.value is not None):
+            raise ValueError("diagnostic_metric_observation_mismatch")
+        return self
+
+
+class DiagnosticMetrics(Model):
+    rss_bytes: DiagnosticMetric
+    open_sockets: DiagnosticMetric
+    open_files: DiagnosticMetric
+    asyncio_tasks: DiagnosticMetric
+    event_loop_lag_ms: DiagnosticMetric
+
+
+class DiagnosticsResponse(Model):
+    scope: Literal["own_server_process_only"]
+    boot_id: Identifier
+    clock_domain: Literal["server_monotonic_ns"]
+    timestamp_ns: ServerNs
+    metrics: DiagnosticMetrics
+    admitted_sessions: Annotated[int, Field(strict=True, ge=0)]
+
+
+class EvidenceSessionRow(Model):
+    """relay_sessions row; trace_complete stays the stored SQLite 0/1 integer."""
+    session_id: Identifier
+    run_id: Identifier
+    trial_id: Identifier
+    arm: Literal["V", "C", "K"]
+    mode: Literal["mock", "live"]
+    boot_id: Identifier
+    started_ns: ServerNs
+    started_utc: Annotated[str, Field(min_length=1, max_length=64)]
+    terminal_outcome: TerminalOutcome | None
+    terminal_reason: Annotated[str | None, Field(max_length=500)]
+    terminal_source: Literal["relay", "client_report", "restart_reconciliation", "mock_fault_simulation"] | None
+    trace_hash: Hash | None
+    trace_complete: SqliteFlag
+    run_manifest_hash: Hash | None
+
+
+class EvidenceTurnRow(Model):
+    session_id: Identifier
+    transport_turn_id: Identifier
+    logical_turn_id: Identifier
+    connection_epoch: Epoch
+    response_epoch: Epoch
+    started_ns: ServerNs
+    terminal_outcome: TerminalOutcome | None
+    terminal_reason: Annotated[str | None, Field(max_length=500)]
+
+
+class EvidenceToneArtifact(Model):
+    """Mock diagnostic output tone reference; bytes stay in the artifact root."""
+    content_hash: Hash
+    artifact_hash: Hash
+    artifact_reference: BoundedReference
+    sample_rate: Literal[24000]
+    channels: Literal[1]
+    encoding: Literal["signed_little_endian_pcm16"]
+    synthetic: Literal[True]
+    kind: Literal["diagnostic_output_tone"]
+
+
+class EvidenceSnapshotArtifact(SnapshotArtifact):
+    content_hash: Hash
+
+
+class EvidenceUnreadableArtifact(EvidenceSnapshotArtifact):
+    """Registered snapshot whose saved bytes are missing or no longer match their hash."""
+    observation: Literal["unknown"]
+    reason: Literal["saved_snapshot_missing_or_hash_invalid", "saved_snapshot_schema_unrecognized"]
+
+
+class EvidenceMissingArtifact(Model):
+    observation: Literal["unknown"]
+    reason: Literal["terminal_snapshot_unavailable"]
+
+
+class EvidenceRetentionArtifact(Model):
+    content_hash: Hash
+    artifact_hash: Hash
+    artifact_reference: BoundedReference
+    kind: Literal["input_artifact_hash", "output_artifact_hash"]
+    retention: RetentionSummary
+
+
+EvidenceArtifact = Annotated[Union[EvidenceToneArtifact, EvidenceSnapshotArtifact, EvidenceRetentionArtifact], Field(discriminator="kind")]
+
+
+class TaskOperationRow(Model):
+    """Original operation; arguments keep closed keys, while their values stay unknown provider proposals."""
+    namespace: Annotated[str, Field(min_length=1, max_length=128)]
+    operation_id: Identifier
+    turn_id: Identifier
+    command: TaskCommand
+    arguments: dict[Literal["slot_id", "challenge", "state_version"], object]
+    outcome: TaskPayload
+
+
+class TaskAttemptRow(Model):
+    id: Annotated[int, Field(strict=True, ge=1)]
+    namespace: Annotated[str, Field(min_length=1, max_length=128)]
+    operation_id: Identifier
+    turn_id: Identifier
+    command: TaskCommand
+    epoch: Epoch
+    duplicate: SqliteFlag
+    outcome: TaskPayload
+
+
+class TaskHistory(Model):
+    trial_namespace: Annotated[str, Field(min_length=1, max_length=128)]
+    task: TaskPayload
+    original_operations: Annotated[list[TaskOperationRow], Field(max_length=256)]
+    attempts: Annotated[list[TaskAttemptRow], Field(max_length=256)]
+    attempt_count: Annotated[int, Field(strict=True, ge=0)]
+    truncated: bool
+    limit: Literal[256]
+
+
+class TaskEvidenceUnknown(Model):
+    observation: Literal["unknown"]
+    reason: Literal["task_evidence_unavailable"]
+
+
+class FaultSnapshot(Model):
+    """Saved or active mock fault controls plus owned adapter counters."""
+    schema_version: Literal[1]
+    session_id: Identifier
+    run_id: Identifier
+    trial_id: Identifier
+    arm: Literal["V", "C", "K"]
+    boot_id: Identifier
+    simulation: Literal[True]
+    seed: Annotated[int, Field(strict=True, ge=0, le=2**32 - 1)]
+    controls: Annotated[list[MockFaultReceipt], Field(max_length=32)]
+    control_count: Annotated[int, Field(strict=True, ge=0, le=32)]
+    runtime_verified: Literal[False]
+    adapter_counters: dict[str, int | bool | str]
+
+
+class CalibrationPhase(Model):
+    phase_id: Identifier
+    status: Literal["active", "ended"]
+    started_ns: ServerNs
+    deadline_ns: ServerNs
+    ended_ns: ServerNs | None
+    session_deadline_ns: ServerNs
+    connection_epoch: Epoch
+    response_epoch: Epoch
+    absolute_cap_ms: Literal[30000]
+    phase_limit: Literal[2]
+    clock_domain: Literal["server_monotonic_ns"]
+
+
+class CalibrationSnapshot(Model):
+    schema_version: Literal[1]
+    session_id: Identifier
+    boot_id: Identifier
+    phases: Annotated[list[CalibrationPhase], Field(max_length=2)]
+    clock_domain: Literal["server_monotonic_ns"]
+    probe_success: Literal["unknown"]
+
+
+class AttemptLineage(Model):
+    scope: Literal["exact_session_id_from_saved_run_snapshot_only"]
+    observation: Literal["saved_snapshot", "unknown"]
+    unresolved_attempt_ids: list[Identifier]
+    other_session_attempts_excluded: Literal[True]
+    inferred_joins: Literal[False]
+
+
+class SessionEvidenceResponse(Model):
+    """GET and POST /sessions/{id}/evidence: one canonical reader, metadata only."""
+    schema_version: Literal[1]
+    run_id: Identifier
+    trial_id: Identifier
+    session_id: Identifier
+    boot_id: Identifier
+    session: EvidenceSessionRow
+    turns: list[EvidenceTurnRow]
+    artifacts: list[EvidenceArtifact]
+    admission: AdmissionEvidence | None
+    clock_domain: Literal["server_monotonic_ns"]
+    clock_scope: Literal["boot_id"]
+    trace_reference: Annotated[str, Field(pattern=r"^traces/[A-Za-z0-9_-]{1,96}\.jsonl$")]
+    spoken_task_acceptance: Literal["unknown"]
+    task_journal: TaskHistory | TaskEvidenceUnknown
+    runtime_verified: Literal[False]
+    ledger: LedgerSummary | None
+    ledger_artifact: EvidenceSnapshotArtifact | EvidenceUnreadableArtifact | EvidenceMissingArtifact
+    faults: FaultSnapshot | None
+    faults_artifact: EvidenceSnapshotArtifact | EvidenceUnreadableArtifact | EvidenceMissingArtifact
+    calibration: CalibrationSnapshot | None
+    calibration_artifact: EvidenceSnapshotArtifact | EvidenceUnreadableArtifact | EvidenceMissingArtifact
+    active_fault_controls: FaultSnapshot | None = None
+    session_attempts: list[dict[str, object]]
+    attempt_lineage: AttemptLineage
+    calibration_phases: Annotated[list[CalibrationPhase] | None, Field(max_length=2)] = None
+
+    @model_validator(mode="after")
+    def one_session(self) -> SessionEvidenceResponse:
+        row = self.session
+        if (row.session_id, row.run_id, row.trial_id, row.boot_id) != (self.session_id, self.run_id, self.trial_id, self.boot_id):
+            raise ValueError("evidence_session_identity_mismatch")
+        if self.trace_reference != f"traces/{self.session_id}.jsonl":
+            raise ValueError("evidence_trace_reference_mismatch")
+        for snapshot, artifact in ((self.ledger, self.ledger_artifact), (self.faults, self.faults_artifact), (self.calibration, self.calibration_artifact)):
+            if (snapshot is None) != (artifact.observation == "unknown"):
+                raise ValueError("evidence_snapshot_reference_mismatch")
+        return self
+
+
+HTTP_RESPONSE_MODELS = {"health": HealthResponse, "admission": AdmissionResponse,
+    "diagnostics": DiagnosticsResponse, "session_evidence": SessionEvidenceResponse}
+HTTP_RESPONSE_REGISTRY_VERSION = 1
+SNAPSHOT_MODELS = {"ledger_snapshot": LedgerSummary, "fault_controls": FaultSnapshot, "calibration_phases": CalibrationSnapshot}
+
+
+def snapshot_matches(kind: str, data: object) -> bool:
+    """True when hash-valid saved snapshot bytes fit the current closed model."""
+    model = SNAPSHOT_MODELS.get(kind)
+    if model is None:
+        return False
+    try:
+        model.model_validate_json(to_json(data))
+    except ValueError:
+        return False
+    return True
+
+
+def validate_http_response(route: str, body: object) -> None:
+    """Check a JSON encoding of the route's own return value; the value itself is sent unchanged."""
+    model = HTTP_RESPONSE_MODELS.get(route)
+    if model is None:
+        raise ValueError("http_response_contract_violation")
+    try:
+        model.model_validate_json(to_json(body))
+    except ValueError:
+        raise ValueError("http_response_contract_violation") from None
+
+
+def http_error_body(code: str) -> dict[str, dict[str, str]]:
+    """Fixed refusal body; a code outside HttpCode degrades to internal_error, never echoed."""
+    body = {"detail": {"code": code}, "error": {"code": code}}
+    try:
+        HttpErrorBody.model_validate_json(to_json(body))
+    except ValueError:
+        body = {"detail": {"code": "internal_error"}, "error": {"code": "internal_error"}}
+    return body
