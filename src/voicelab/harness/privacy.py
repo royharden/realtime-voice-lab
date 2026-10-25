@@ -133,6 +133,7 @@ absolute_cap_ms phase_limit task_deadlines_retained captured_turn_created probe_
 calibration_phase_receipt calibration_phase_end calibration_phases calibration_artifact phases
 actually_returned_models budget_usd budget_owner owner_id lease_observation
 commitCount lastCommit lastCompletion
+wire_validation registry validation metadata_sha256
 '''.split())
 
 JSON_CONTAINERS = frozenset({'payload', 'task', 'cost', 'arguments'})

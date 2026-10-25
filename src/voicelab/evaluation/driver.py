@@ -3,12 +3,34 @@ from __future__ import annotations
 
 import re
 
-from voicelab.contracts import AdmissionEvidence, LicensedControlEvidence, ServerMessage, VoiceEvent
+from voicelab.contracts import AdmissionEvidence, LicensedControlEvidence, VoiceEvent
+
+from .artifacts import digest
+from .wire import validate_server_metadata
 
 AUXILIARY_ROLES = frozenset({'calibration_control'})
 _SHA256 = re.compile(r'^[a-f0-9]{64}$')
 LINEAGE_FIELDS = ('attempt_id', 'session_id', 'observed_logical_turn_id', 'observed_transport_turn_id',
                   'observed_trial_id', 'connection_epoch', 'response_epoch', 'observed_boot_id')
+
+
+def _wire_metadata(event: dict) -> dict:
+    """Require a captured canonical parse before checking the redacted structure.
+
+    The receipt is hashed producer testimony, never an independent verdict or
+    permission to restore content. Legacy captures lacking it remain unknown.
+    """
+    message = event.get('message_metadata', {})
+    receipt = event.get('wire_validation')
+    if receipt is None:
+        raise ValueError('missing producer canonical wire validation receipt')
+    expected = {'registry': 'server_payload_v1', 'validation': 'passed',
+                'metadata_sha256': digest(message),
+                'scope': 'producer_wire_validation_before_privacy_projection'}
+    if receipt != expected:
+        raise ValueError('invalid producer wire validation receipt')
+    validate_server_metadata(message)
+    return message
 
 
 def _rollup(event: dict) -> dict | None:
@@ -122,6 +144,8 @@ def convert_driver_events(events: list[dict], plan: dict, *, mode: str = 'mock')
                 entry['scheduled'], entry['phase'] = True, event.get('phase')
             elif kind == 'auxiliary_session_evidence_unknown':
                 entry['evidence_unknown'].append(str(event.get('error_type', 'unknown')))
+            elif kind == 'wire_parse_error':
+                entry['evidence_unknown'].append('producer rejected wire payload')
             elif kind == 'wire_audio_rollup':
                 checked = _rollup(event)
                 if checked is None:
@@ -157,7 +181,14 @@ def convert_driver_events(events: list[dict], plan: dict, *, mode: str = 'mock')
             candidate['observed_run_id'] = plan['run_id'] if task_id not in ready else ready[task_id]['observed_run_id']
             candidate['task_id'] = task_id
             candidate['source'] = 'reservation_lineage'
-            if any(candidate[key] is None for key in LINEAGE_FIELDS[:5]):
+            observed = ready.get(task_id)
+            if (any(candidate[key] is None for key in LINEAGE_FIELDS)
+                    or observed is None
+                    or any(candidate[key] != observed[key] for key in (
+                        'session_id', 'observed_trial_id', 'observed_boot_id'))
+                    or event.get('observed_run_id') != observed['observed_run_id']
+                    or any(type(candidate[key]) is not int or candidate[key] < 0
+                           for key in ('connection_epoch', 'response_epoch'))):
                 lineage_unresolved.append(candidate['attempt_id'] or 'attempt_lineage_observed_incomplete')
                 continue
             old = attempt_mappings.get(candidate['attempt_id'])
@@ -169,11 +200,35 @@ def convert_driver_events(events: list[dict], plan: dict, *, mode: str = 'mock')
         if kind == 'cohort_obligation' and event.get('code') == 'run_snapshot_attempt_lineage_unresolved':
             lineage_unresolved.append('run_snapshot_attempt_lineage_unresolved')
             continue
+        if kind == 'wire_parse_error' and event.get('direction') == 'received':
+            issues.append('producer rejected received server wire payload')
+            continue
+        if kind == 'plan_turn_mapping':
+            observed = ready.get(task_id)
+            if (observed is None or turn is None or any(event.get(key) != observed.get(key)
+                    for key in ('observed_run_id', 'observed_trial_id', 'observed_boot_id', 'session_id'))
+                    or not all(isinstance(event.get(key), str) and event[key]
+                               for key in ('observed_logical_turn_id', 'observed_transport_turn_id'))
+                    or any(type(event.get(key)) is not int or event[key] < 0
+                           for key in ('connection_epoch', 'response_epoch'))):
+                issues.append('plan turn mapping lacks exact observed session/epoch identity')
+                continue
+            identity = (observed['observed_run_id'], observed['observed_trial_id'],
+                        observed['session_id'], event['observed_transport_turn_id'])
+            value = {**observed, **{key: event[key] for key in (
+                'observed_logical_turn_id', 'observed_transport_turn_id', 'connection_epoch', 'response_epoch')},
+                'logical_turn_id': turn}
+            old = mappings.get(identity)
+            if old is not None and any(old.get(key) != value[key] for key in value
+                                       if key in old and old[key] is not None):
+                raise ValueError('conflicting observed plan turn mapping')
+            else:
+                mappings[identity] = value
+            continue
         if kind == 'wire_received':
-            message = event.get('message_metadata', {})
             try:
-                ServerMessage.model_validate(message)
-            except ValueError:
+                message = _wire_metadata(event)
+            except (ValueError, TypeError):
                 issues.append('malformed received driver wire envelope')
                 continue
             payload = message.get('payload', {})
@@ -192,15 +247,20 @@ def convert_driver_events(events: list[dict], plan: dict, *, mode: str = 'mock')
                 ready[task_id] = value
             # A transport's ended ledger can supply attempt-to-observed-task correlations.
             if message.get('type') == 'ended' and task_id in ready:
-                scope = (payload.get('ledger_artifact') or {}).get('scope')
                 ledger = payload.get('ledger')
                 for attempt in ledger.get('attempts', []) if isinstance(ledger, dict) else []:
                     # D4 emits a whole-run snapshot. Capturing it for this session
                     # does not assign every historical attempt to this session.
-                    if scope != 'session_ledger_snapshot' and attempt.get('session_id') != ready[task_id]['session_id']:
+                    if attempt.get('session_id') != ready[task_id]['session_id']:
+                        continue
+                    if (attempt.get('lineage_observation') != 'recorded_at_reservation'
+                            or attempt.get('trial_id') != ready[task_id]['observed_trial_id']
+                            or attempt.get('owner_id') != ready[task_id]['observed_boot_id']):
+                        lineage_unresolved.append(attempt.get('attempt_id') or 'ended_attempt_lineage_incomplete')
                         continue
                     candidate = {**ready[task_id], 'attempt_id': attempt['attempt_id'],
-                                 'observed_logical_turn_id': attempt['logical_turn_id']}
+                                 'observed_logical_turn_id': attempt['logical_turn_id'],
+                                 'source': 'reservation_lineage'}
                     if attempt.get('lineage_observation') == 'recorded_at_reservation':
                         candidate.update(observed_transport_turn_id=attempt.get('transport_turn_id'),
                                          connection_epoch=attempt.get('connection_epoch'),
@@ -238,11 +298,14 @@ def convert_driver_events(events: list[dict], plan: dict, *, mode: str = 'mock')
             if message.get('type') in {'audio', 'commit'} and message.get('turn_id'):
                 observed = ready[task_id]
                 identity = (observed['observed_run_id'], observed['observed_trial_id'], observed['session_id'], message['turn_id'])
-                value = {**observed, 'observed_transport_turn_id': message['turn_id'], 'logical_turn_id': turn}
-                if identity in mappings and mappings[identity]['logical_turn_id'] != turn:
-                    issues.append('observed transport turn mapped to multiple planned turns')
+                value = {**observed, 'observed_transport_turn_id': message['turn_id'], 'logical_turn_id': turn,
+                         'connection_epoch': message.get('connection_epoch'),
+                         'response_epoch': message.get('response_epoch')}
+                if identity in mappings and any(mappings[identity].get(key) != value[key]
+                        for key in value if key in mappings[identity] and mappings[identity][key] is not None):
+                    raise ValueError('observed transport turn mapped to multiple planned turns')
                 else:
-                    mappings[identity] = value
+                    mappings[identity] = {**mappings.get(identity, {}), **value}
         # Only explicit measured browser anchors are admitted. Driver ns timestamps,
         # DOM states, response-done text and wait durations cannot supply browser latency.
         timing = event.get('timing')
@@ -270,11 +333,15 @@ def convert_driver_events(events: list[dict], plan: dict, *, mode: str = 'mock')
         prefix = (attempt['observed_run_id'], attempt['observed_trial_id'], attempt['session_id'])
         keys = [prefix + (value,) for value in (attempt.get('observed_transport_turn_id'),
                                                  attempt['observed_logical_turn_id']) if value is not None]
-        targets = {mappings[key]['logical_turn_id'] for key in keys if key in mappings}
+        targets = {mappings[key]['logical_turn_id'] for key in keys if key in mappings
+                   and all(attempt.get(field) is not None and mappings[key].get(field) == attempt[field]
+                           for field in ('observed_boot_id', 'observed_logical_turn_id',
+                                         'connection_epoch', 'response_epoch'))}
         if len(targets) == 1:
             resolved_attempts.append({**attempt, 'logical_turn_id': next(iter(targets))})
         else:
             issues.append('attempt lacks unambiguous session-to-plan mapping: ' + attempt['attempt_id'])
+            lineage_unresolved.append(attempt['attempt_id'])
     if issues:
         for row in observations.values():
             row['timing_domain'], row['outcome'] = 'unknown', 'missing_terminal'
