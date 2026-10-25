@@ -83,6 +83,8 @@ def test_plan_turn_mapping_joins_repeated_transport_ids_by_session():
 @pytest.mark.parametrize('change', [
     {'observed_boot_id': 'another-owner'}, {'connection_epoch': 1}, {'response_epoch': 1},
     {'observed_trial_id': 'another-trial'}, {'session_id': 'another-session'},
+    {'observed_transport_turn_id': 'another-transport'},
+    {'observed_logical_turn_id': 'another-logical'},
 ])
 def test_reservation_lineage_mismatch_never_joins(change):
     """what_bug_this_catches: reservation ownership/epochs inferred from a nearby Ready."""
