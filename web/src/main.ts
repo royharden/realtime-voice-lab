@@ -381,6 +381,12 @@ async function start(){
     fail(code==='NotAllowedError'||code==='SecurityError'?'permission_denied':code==='NotFoundError'||code==='NotReadableError'?'device_lost':code==='NotSupportedError'||error instanceof ReferenceError?'unsupported_audio':'startup_failure',String(error));
   }
 }
+// Finish component initialization before session handlers or diagnostics can use them.
+const reviewWorkbench=mountReviewWorkbench(el('review-workbench'),{onChanged:()=>replayRefresh(),canPlay:()=>['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown','unsupported_audio'].includes(state)&&Object.values(ownedHandles()).every(n=>n===0)});
+const replayInspector=mountReplayInspector(el('replay-inspector'),{reviewBinding:()=>reviewWorkbench.replayBinding(),focusReview:()=>reviewWorkbench.focus()});
+replayRefresh=()=>{replayInspector.refresh();};
+const sessionEvidence=mountSessionEvidence(el('session-evidence'),{canInspect:()=>state==='closed'&&Object.values(ownedHandles()).every(n=>n===0)});
+
 el<HTMLSelectElement>('mode').onchange=()=>{const select=el<HTMLSelectElement>('mode');if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','disconnected','recovery_unknown'].includes(state)){select.value=mode;return;}if(state==='disconnected'||cleanupPending()){select.value=mode;el('error').textContent='End the current recovery and wait for cleanup before switching mode.';return;}sessionEvidence.clear();++token;mode=select.value==='live'?'live':'mock';document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>{button.querySelector('small')!.textContent=mode==='live'?'Operator capability gate · unverified':button.dataset.arm==='V'?'Wire mock':button.dataset.arm==='C'?'STT → controller → TTS mock':'No generation';});retainedSession=undefined;el('live-consent-label').hidden=mode!=='live';el<HTMLInputElement>('live-consent').checked=false;el<HTMLInputElement>('text').disabled=mode==='live';el('stimulus').querySelector('button')!.disabled=mode==='live';el('evidence').textContent=mode==='live'?'LIVE · GATED / UNVERIFIED. No live activation is authorized by this UI. Separate operator authorization, capabilities, prices and matching relay mode are required; runtime and acoustic behavior remain unverified.':'KEYLESS MOCK · Source construction / runtime unverified. Synthetic tones and typed stimuli cannot establish spoken-task correctness or acoustic latency.';trace('mode_selected',{mode,admission:'server_required'});};
 el('start').onclick=()=>void start();el('end').onclick=end;el('interrupt').onclick=interrupt;el('disconnect').onclick=()=>{if(admitted)lostTransport();};el('retry').onclick=()=>{if(state==='awaiting_response'&&playbackDone&&!activeResponse){listen();}else if(['playing','awaiting_response','listening'].includes(state))interrupt();else void start();};
 document.querySelectorAll<HTMLButtonElement>('[data-arm]').forEach(button=>button.onclick=()=>{if(!['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown'].includes(state)||cleanupPending())return;sessionEvidence.clear();retainedSession=undefined;if(!isArm(button.dataset.arm))return;arm=button.dataset.arm;document.querySelectorAll('.arm').forEach(b=>b.classList.toggle('selected',b===button));});
@@ -423,11 +429,3 @@ const browserDiagnostics=Object.freeze({
 declare global {interface Window {readonly __voiceLabDiagnostics:typeof browserDiagnostics}}
 Object.defineProperty(window,'__voiceLabDiagnostics',{value:browserDiagnostics,writable:false,configurable:false});
 updateControls();
-
-const reviewWorkbench=mountReviewWorkbench(el('review-workbench'),{onChanged:()=>replayRefresh(),canPlay:()=>['idle','closed','failed','permission_denied','device_lost','device_muted','silence_timeout','recovery_unknown','unsupported_audio'].includes(state)&&Object.values(ownedHandles()).every(n=>n===0)});
-
-const replayInspector=mountReplayInspector(el('replay-inspector'),{reviewBinding:()=>reviewWorkbench.replayBinding(),focusReview:()=>reviewWorkbench.focus()});
-
-replayRefresh=()=>{replayInspector.refresh();};
-
-const sessionEvidence=mountSessionEvidence(el('session-evidence'),{canInspect:()=>state==='closed'&&Object.values(ownedHandles()).every(n=>n===0)});
