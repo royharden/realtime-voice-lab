@@ -11,10 +11,23 @@ from functools import lru_cache
 import types
 from typing import Annotated, Union, get_args, get_origin
 
-from pydantic import BaseModel, TypeAdapter, create_model
+from pydantic import BaseModel, TypeAdapter, create_model, model_validator
 
 from voicelab.contracts import Model, ServerMessageVariant
 from voicelab.harness.privacy import CONTROL_VALUES, FIELDS, observed_metadata
+
+
+# Dependencies of canonical validators on models that lose fields. Reuse their
+# implementations whenever every dependency survives; omitted content is never
+# filled with placeholders. New validators require an explicit projection audit.
+_VALIDATOR_FIELDS = {
+    ('LicensedControlEvidence', 'opened_observation'): {'approval_observation', 'asset_observation'},
+    ('TaskPayload', 'control_view_is_descriptive'): {
+        'control_only', 'task_applicability', 'spoken_correctness', 'effect_committed', 'ok'},
+    ('AudioPayload', 'persisted_reference'): {'artifact_persisted', 'artifact_hash'},
+    ('ControllerSpanEvent', 'ordered_span'): {'start_ns', 'end_ns'},
+    ('EndedPayload', 'snapshot_reference'): {'ledger', 'ledger_artifact'},
+}
 
 
 def _retained(name: str) -> bool:
@@ -52,11 +65,21 @@ def _model(model):
             annotation, field.default = Union[annotation, None], None
         field.annotation = annotation
         fields[name] = (annotation, field)
-    # Keep canonical cross-field validators where their model fields survive.
-    # Otherwise do not invoke validators that require omitted content. Model's
-    # extra=forbid and every retained field constraint remain active in both cases.
-    base = model if set(fields) == set(model.model_fields) else Model
-    return create_model(model.__name__ + 'Metadata', __base__=base, **fields)
+    if set(fields) == set(model.model_fields):
+        return create_model(model.__name__ + 'Metadata', __base__=model, **fields)
+    if model.__pydantic_decorators__.field_validators:
+        raise ValueError('canonical field validator requires metadata projection audit: ' + model.__name__)
+    validators = {}
+    for name, validator in model.__pydantic_decorators__.model_validators.items():
+        dependencies = _VALIDATOR_FIELDS.get((model.__name__, name))
+        if dependencies is None or validator.info.mode != 'after':
+            raise ValueError('canonical validator requires metadata projection audit: ' + model.__name__ + '.' + name)
+        if not dependencies <= fields.keys():
+            if (model.__name__, name) == ('ControllerSpanEvent', 'ordered_span'):
+                continue  # Both span bounds are omitted, so ordering remains unknown.
+            raise ValueError('canonical validator dependencies removed by metadata projection: ' + model.__name__ + '.' + name)
+        validators[name] = model_validator(mode='after')(validator.func)
+    return create_model(model.__name__ + 'Metadata', __base__=Model, __validators__=validators, **fields)
 
 
 @lru_cache(maxsize=1)

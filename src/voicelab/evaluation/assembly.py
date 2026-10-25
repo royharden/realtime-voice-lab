@@ -69,9 +69,21 @@ def _index(rows: list[dict], key: str) -> dict[str, dict]:
 
 def _trace_rows(raw: list[dict], manifest: dict, assignment: dict, correlations: list[dict], session_records: list[dict]) -> tuple[list[dict], list[str]]:
     output, issues, sequences, times = [], [], {}, {}
-    mapping = {(r['observed_run_id'], r['observed_trial_id'], r['session_id'],
-                r.get('observed_transport_turn_id') or r.get('observed_logical_turn_id')): r['logical_turn_id']
-               for r in correlations}
+    # Each recovery transport needs its own mapping. A logical parent alone
+    # cannot supply the boot or epochs of the actual observed transport.
+    context = ('observed_run_id', 'observed_trial_id', 'session_id', 'observed_boot_id',
+               'connection_epoch', 'response_epoch', 'observed_transport_turn_id', 'observed_logical_turn_id')
+    mapping, parents = {}, {}
+    for correlation in correlations:
+        if (any(not isinstance(correlation.get(key), str) or not correlation[key]
+                for key in context if key not in {'connection_epoch', 'response_epoch'})
+                or any(type(correlation.get(key)) is not int or correlation[key] < 0
+                       for key in ('connection_epoch', 'response_epoch'))):
+            continue  # Incomplete/sent-only mappings cannot qualify trace facts.
+        identity = tuple(correlation[key] for key in context)
+        mapping.setdefault(identity, set()).add(correlation['logical_turn_id'])
+        parent = identity[:4] + (correlation['observed_logical_turn_id'],)
+        parents.setdefault(parent, set()).add(correlation['logical_turn_id'])
     sessions = {(r['observed_run_id'], r['observed_trial_id'], r['session_id']) for r in correlations}
     sessions.update((r['observed_run_id'], r['observed_trial_id'], r['session_id']) for r in session_records)
     for index, row in enumerate(raw):
@@ -81,25 +93,27 @@ def _trace_rows(raw: list[dict], manifest: dict, assignment: dict, correlations:
             issues.append(f"trace record {index}: malformed canonical event")
             continue
         observed_session = (event['run_id'], event['trial_id'], event['session_id'])
-        turn = mapping.get(observed_session + (event.get('transport_turn_id') or event.get('logical_turn_id'),))
-        original_parent = mapping.get(observed_session + (event.get('logical_turn_id'),))
-        if original_parent is not None:
-            if turn is not None and turn != original_parent:
-                issues.append('recovery transport mapping conflicts with original logical parent')
-            turn = original_parent
-        correlated = turn is not None
-        if not correlated:
-            turn = event['logical_turn_id']
+        identity = observed_session + (event.get('boot_id'), event['connection_epoch'], event['response_epoch'],
+                                       event.get('transport_turn_id'), event.get('logical_turn_id'))
+        targets = mapping.get(identity, set())
+        turn = next(iter(targets)) if len(targets) == 1 else None
+        if len(parents.get(identity[:4] + (event.get('logical_turn_id'),), set())) > 1:
+            issues.append('recovery transport mapping conflicts with original logical parent')
+            turn = None
+        if event['logical_turn_id'] is not None or event['transport_turn_id'] is not None:
+            if turn is None:
+                issues.append(f'trace record {index}: lacks unambiguous exact observed transport context')
         if event["run_id"] != manifest["run_id"] and observed_session not in sessions:
             raise ValueError("trace contains a different run")
         if turn is not None:
             if turn not in assignment:
                 raise ValueError("trace turn outside scheduled denominator")
-            if event['arm'] != assignment[turn]['arm'] or (not correlated and event['trial_id'] != assignment[turn]['trial_id']):
+            if event['arm'] != assignment[turn]['arm']:
                 raise ValueError("trace trial/arm differs from prespecified assignment")
             expected_boot = assignment[turn].get('observed_boot_id')
             if expected_boot is not None and event.get('boot_id') != expected_boot:
                 issues.append('trace boot differs from observed ready mapping')
+                turn = None
         # Internal join key only. Original canonical event IDs remain untouched.
         event['_scheduled_logical_turn_id'] = turn
         key = (event["session_id"], event.get("boot_id"), event["connection_epoch"], event["clock_domain"])

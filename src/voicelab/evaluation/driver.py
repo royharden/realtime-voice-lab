@@ -327,15 +327,15 @@ def convert_driver_events(events: list[dict], plan: dict, *, mode: str = 'mock')
                 observations[turn]['admission'] = 'refused'
     # Resolve ledger attempts by exact observed session + transport, never by turn ID
     # alone: browser turn IDs can repeat across several task sessions.
-    # A reservation-time transport ID is preferred; the original logical ID is the fallback.
+    # Reservation-time transport identity is explicit, never an alias for a
+    # different transport that happens to share the same logical parent.
     resolved_attempts = []
     for attempt in attempt_mappings.values():
         prefix = (attempt['observed_run_id'], attempt['observed_trial_id'], attempt['session_id'])
-        keys = [prefix + (value,) for value in (attempt.get('observed_transport_turn_id'),
-                                                 attempt['observed_logical_turn_id']) if value is not None]
+        keys = [prefix + (attempt.get('observed_transport_turn_id'),)]
         targets = {mappings[key]['logical_turn_id'] for key in keys if key in mappings
                    and all(attempt.get(field) is not None and mappings[key].get(field) == attempt[field]
-                           for field in ('observed_boot_id', 'observed_logical_turn_id',
+                           for field in ('observed_boot_id', 'observed_logical_turn_id', 'observed_transport_turn_id',
                                          'connection_epoch', 'response_epoch'))}
         if len(targets) == 1:
             resolved_attempts.append({**attempt, 'logical_turn_id': next(iter(targets))})
