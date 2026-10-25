@@ -39,3 +39,26 @@ def test_trace_mapping_mismatch_is_unknown_or_refused(change):
     except ValueError:
         return
     assert issues or not rows
+
+
+def test_explicit_recovery_transport_mapping_positive():
+    """what_bug_this_catches: fixing fallback by rejecting a separately evidenced recovery."""
+    manifest, assignment, original, event = inputs()
+    retry = {**original, 'observed_transport_turn_id': 'retry-transport',
+             'connection_epoch': 1, 'response_epoch': 1}
+    event.update(transport_turn_id='retry-transport', connection_epoch=1, response_epoch=1)
+    rows, issues = _trace_rows([event], manifest, assignment, [original, retry], [])
+    assert issues == [] and rows[0]['_scheduled_logical_turn_id'] == 'planned-turn'
+
+
+def test_recovery_transport_with_wrong_current_epoch_refuses():
+    """what_bug_this_catches: a known retry transport borrowing a sibling epoch's mapping."""
+    manifest, assignment, original, event = inputs()
+    retry = {**original, 'observed_transport_turn_id': 'retry-transport',
+             'connection_epoch': 1, 'response_epoch': 1}
+    event.update(transport_turn_id='retry-transport', connection_epoch=2, response_epoch=1)
+    try:
+        rows, issues = _trace_rows([event], manifest, assignment, [original, retry], [])
+    except ValueError:
+        return
+    assert issues or not rows
