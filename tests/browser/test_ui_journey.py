@@ -119,8 +119,35 @@ def test_boot_initializes_controls_without_pageerrors(serve):
                     assert await page.locator('#' + control).evaluate('(node)=>typeof node.onclick') == 'function'
                 for panel in ('session-evidence', 'review-workbench', 'replay-inspector', 'relay-metadata'):
                     assert await page.locator('#' + panel).inner_text()
+                assert await page.locator('#replay-inspector [data-rp="raw"]').evaluate(
+                    '(node)=>typeof node.onclick') == 'function'
+                assert await page.locator('#replay-inspector [data-rp="raw-offset"]').count() == 1
             finally:
                 await browser.close()
+
+    with serve('127.0.0.1') as server:
+        asyncio.run(scenario(server))
+
+
+def test_same_origin_metadata_buttons_use_protected_post_only(serve):
+    """what_bug_this_catches: metadata panels using GET/fallback or posting nonce in a URL."""
+    async def scenario(server):
+        async with ui(server) as (page, seen):
+            for route in ('admission', 'diagnostics'):
+                async with page.expect_response(lambda response: response.url ==
+                                                server['relay_origin'] + '/' + route) as pending:
+                    await page.get_by_test_id(route + '-read').click()
+                response = await pending.value
+                assert response.status == 200
+                assert response.request.method == 'POST'
+                assert response.request.post_data == '{}'
+                assert response.request.headers['x-voicelab-nonce'] == server['nonce']
+                await page.wait_for_function('''()=>document.querySelector(
+                  '[data-testid="relay-metadata-status"]').textContent.startsWith('Received structural metadata')''')
+            assert not any(method == 'GET' and url.endswith(('/admission', '/diagnostics'))
+                           for method, url in seen['requests'])
+            assert server['nonce'] not in page.url
+            await _end_and_wait_closed(page)
 
     with serve('127.0.0.1') as server:
         asyncio.run(scenario(server))
@@ -217,6 +244,12 @@ def test_separate_origin_serving_is_visibly_refused(serve):
                 '()=>document.querySelector("#session-evidence [data-status]").textContent'
                 '.startsWith("Incomplete serving seam")', timeout=4000)
             assert 'Cross-origin evidence reads are refused' in await status.inner_text()
+            for route in ('admission', 'diagnostics'):
+                await page.get_by_test_id(route + '-read').click()
+                await page.wait_for_function('''()=>document.querySelector(
+                  '[data-testid="relay-metadata-status"]').textContent.startsWith('Local metadata unavailable')''')
+            assert not any(method == 'POST' and url.endswith(('/admission', '/diagnostics'))
+                           for method, url in seen['requests'])
             await _end_and_wait_closed(page)
             assert await page.locator('#session-evidence [data-read]').is_disabled()
             cross = await page.evaluate('''async (origin)=>{
