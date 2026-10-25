@@ -16,6 +16,48 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def junit_counts(report: Path) -> dict[str, int]:
+    """Check pytest's flat JUnit suites against the testcases actually reported."""
+    root = ET.parse(report).getroot()
+    if root.tag not in ('testsuite', 'testsuites'):
+        raise ValueError('expected testsuite or testsuites root')
+    suites = [root] if root.tag == 'testsuite' else root.findall('testsuite')
+    if not suites or len(list(root.iter('testsuite'))) != len(suites):
+        raise ValueError('expected nonempty flat pytest testsuites')
+    totals = dict.fromkeys(('tests', 'failures', 'errors', 'skipped'), 0)
+
+    def check_counts(element, actual, required=True):
+        for key, count in actual.items():
+            raw = element.get(key)
+            if raw is None and not required:
+                continue
+            if raw is None or not raw.isascii() or not raw.isdigit():
+                raise ValueError(f'invalid or missing {key} counter')
+            if int(raw) != count:
+                raise ValueError(f'{key} counter contradicts actual testcases')
+
+    for suite in suites:
+        cases = suite.findall('testcase')
+        if len(list(suite.iter('testcase'))) != len(cases):
+            raise ValueError('testcases must be direct testsuite children')
+        actual = dict.fromkeys(totals, 0)
+        actual['tests'] = len(cases)
+        for case in cases:
+            outcomes = [child.tag for child in case if child.tag in ('failure', 'error', 'skipped')]
+            if len(outcomes) > 1:
+                raise ValueError('testcase has contradictory outcome elements')
+            for tag, key in (('failure', 'failures'), ('error', 'errors'), ('skipped', 'skipped')):
+                actual[key] += outcomes.count(tag)
+        check_counts(suite, actual)
+        for key in totals:
+            totals[key] += actual[key]
+    if len(list(root.iter('testcase'))) != totals['tests']:
+        raise ValueError('testcases outside declared suites')
+    if root.tag == 'testsuites':
+        check_counts(root, totals, required=False)
+    return totals
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--phase', choices=('unit', 'cli', 'browser', 'all'), default='unit')
@@ -55,15 +97,23 @@ def main():
                 env['PYTHONPATH'] = str(args.source / 'src')
                 completed = subprocess.run(command, capture_output=True, timeout=args.timeout, env=env)
                 (args.out / f'{phase}.log').write_bytes(completed.stdout + completed.stderr)
-                item.update(returncode=completed.returncode, status='passed' if completed.returncode == 0 else 'failed')
-                if report.is_file():
-                    suites = ET.parse(report).getroot().iter('testsuite')
-                    item['counts'] = {k: 0 for k in ('tests', 'failures', 'errors', 'skipped')}
-                    for suite in suites:
-                        for key in item['counts']:
-                            item['counts'][key] += int(suite.get(key, '0'))
-                    if item['counts']['skipped']:
-                        item['status'] = 'incomplete'
+                item.update(returncode=completed.returncode,
+                            status='incomplete' if completed.returncode == 0 else 'failed')
+                item['report'] = str(report)
+                try:
+                    item['counts'] = junit_counts(report)
+                except (OSError, ET.ParseError, ValueError) as error:
+                    item['reason'] = f'invalid JUnit report: {error}'
+                else:
+                    counts = item['counts']
+                    if counts['failures'] or counts['errors']:
+                        item.update(status='failed', reason='JUnit reports failures or errors')
+                    elif not counts['tests']:
+                        item['reason'] = 'JUnit reports no actual testcases'
+                    elif counts['skipped']:
+                        item['reason'] = 'JUnit reports skipped testcases'
+                    elif completed.returncode == 0:
+                        item['status'] = 'passed'
             except subprocess.TimeoutExpired as error:
                 (args.out / f'{phase}.log').write_bytes((error.stdout or b'') + (error.stderr or b''))
                 item.update(status='timeout', returncode=None)
