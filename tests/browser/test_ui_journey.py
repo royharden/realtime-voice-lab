@@ -101,6 +101,31 @@ async def _end_and_wait_closed(page):
     await wait_state(page, ['closed'], timeout=8000)
 
 
+def test_boot_initializes_controls_without_pageerrors(serve):
+    """what_bug_this_catches: null onclick/temporal initialization errors before Start is usable.
+    A rendered page alone is insufficient: required handlers and all panels must initialize.
+    """
+    async def scenario(server):
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                errors = []
+                page.on('pageerror', lambda error: errors.append(str(error)))
+                await page.goto(server['page_origin'], wait_until='networkidle', timeout=10000)
+                assert errors == [], 'boot pageerrors: ' + json.dumps(errors)
+                assert await page.locator('#state').inner_text() == 'idle'
+                for control in ('start', 'end', 'interrupt', 'disconnect', 'retry', 'download'):
+                    assert await page.locator('#' + control).evaluate('(node)=>typeof node.onclick') == 'function'
+                for panel in ('session-evidence', 'review-workbench', 'replay-inspector', 'relay-metadata'):
+                    assert await page.locator('#' + panel).inner_text()
+            finally:
+                await browser.close()
+
+    with serve('127.0.0.1') as server:
+        asyncio.run(scenario(server))
+
+
 def test_mock_journey_through_ui_and_post_end_evidence_inspector(serve):
     """what_bug_this_catches: a UI that cannot complete a scheduled mock turn against the real
     relay, an End that leaves session handles or skips the terminal, a post-End inspector
