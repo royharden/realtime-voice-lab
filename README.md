@@ -2,11 +2,11 @@
 
 Compare the full path of a native voice arm (V), a deterministic STT → controller → TTS arm (C), and a canned control (K) on one fictional appointment task. The workbench preserves interruptions, task effects, uncertain timing, retries and all-attempt cost instead of showing only fast successful responses.
 
-**Source construction — runtime unverified.** This repository was built with static checks only. No tests, browser journey, microphone experiment, calibration, soak, provider call, live comparison or independent product acceptance has run. There is no recorded demo or measured result yet. Mock mode uses typed diagnostic text and a short synthetic tone; it cannot establish speech recognition, spoken correctness or physical acoustic latency.
+**Offline validation in progress.** The pinned Python environment installs reproducibly, all 51 baseline tests collect, and 48 non-browser tests pass (see [validation](docs/VALIDATION.md)). Browser journeys, Docker, microphone experiments, device calibration, soak, provider calls, live comparison and independent product acceptance are not established by those checks. There is no recorded demo or measured latency result here. Mock mode uses typed diagnostic text and a short synthetic tone; it cannot establish speech recognition, spoken correctness or physical acoustic latency.
 
-## What source exists (nothing has run)
+## Implemented source
 
-Every item below is source written under static checks only (syntax/JSON parse, `git diff --check`, focused source review). None of it has been executed, imported by a test run, or validated at runtime.
+The source below was originally built under static checks. The executed Python baseline covers selected invariants; it does not validate every feature or replace the remaining integration and acceptance gates.
 
 - **Arms:** keyless V/C/K mocks; guarded live V/C source; conditional licensed fixed-PCM K source (live mode, explicit config, external verifier). No licensed assets, rights, verifier or approval are supplied.
 - **Protocol and gates:** bounded protocol v1 with a closed server payload registry (`contracts/server-payloads-v1.json`, producer-boundary validation); live/K configuration gates; protected HTTP calibration phases.
@@ -17,23 +17,34 @@ Every item below is source written under static checks only (syntax/JSON parse, 
 - **Evaluation:** planning, gates, assembly, custody, adjudication, exposure, sealed reproduction and metadata-only retention planning.
 - **Harness drivers:** browser journey, cohort/catalog/admission, calibration and soak orchestration (Playwright source).
 - **Web:** generated bindings and a protected post-End session evidence inspector.
-- **Tests:** `tests/` holds regression, wire, local-boundary and keyless-journey contract source. **These tests have never been run**; whether they pass is unknown.
+- **Tests:** `tests/` holds regression, wire, local-boundary and keyless-journey contracts. The 48-test Python baseline passes; the three actual UI tests require separate browser/build/port evidence.
 
-Deferred validation (dependency resolution, tests, runtime, browser/device calibration, fixtures, live comparison and independent acceptance) is listed in [limitations](docs/LIMITATIONS.md).
+Executed checks and reproduction steps are in [validation](docs/VALIDATION.md). Broader limitations and the live/rights/acceptance gates remain in [limitations](docs/LIMITATIONS.md).
 
-## Keyless quickstart — later activation (not yet executed)
+## Keyless quickstart
 
-These commands describe the source interfaces; they were not executed during construction. After runtime activation is authorized, resolve/install the pinned Python and web dependencies and generate reviewed locks. Claim and check separate loopback relay/frontend ports with agent-ports before starting listeners. Use Python 3.12 and Node with the pinned Vite/TypeScript versions in `web/package.json`.
+From PowerShell 7, use the product worktree's absolute path. Install uv 0.11.19 separately, then run the local bootstrap (executed successfully in the environment candidate):
 
-Set `VOICELAB_NONCE` to an operator-chosen per-launch 16–128 character value and `VOICELAB_ALLOWED_ORIGIN` to the exact frontend origin, for example `http://127.0.0.1:<claimed-frontend-port>`. Optional `VOICELAB_ARTIFACT_ROOT` controls the local owned runtime artifact directory. Do not put provider keys into the browser or repository.
-
-```text
-uv run voicelab serve --mode mock --port <claimed-relay-port> --port-claim <existing-claim-receipt> --run-id <frozen-run-id> --run-manifest-hash <manifest-file-sha256> --artifact-root <owned-runtime-root> --allowed-origin http://127.0.0.1:<claimed-frontend-port>
+```powershell
+$project = '<absolute-product-worktree>'
+& "$project/scripts/bootstrap.ps1"
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli --help
+& "$project/.venv/Scripts/python.exe" -m pytest "$project/tests" -c "$project/pyproject.toml" --ignore="$project/tests/browser/test_ui_journey.py" -q
 ```
 
-In `web/`, set `VOICELAB_WEB_PORT` to the checked frontend port and use `npm run dev` after authorized dependency setup. Enter `ws://127.0.0.1:<claimed-relay-port>/ws` and the launch nonce in the UI. Select an arm, Start, and use the labeled typed stimulus: `hours`, `list slots`, `select slot 1`, `confirm`, `status`. Unknown wording asks clarification. Interrupt, Simulate disconnect, explicit retry, End, task journal and trace inspection are implemented in source. Microphone capture does not transcribe audio in mock mode. See [browser notes](web/README.md).
+Bootstrap installs CPython 3.12.13 locally and synchronizes `uv.lock` with test/validation extras. It starts no service and installs no browser binary. Keep the working directory at the outer shell. See [operations](docs/OPERATIONS.md) for full CLI flags and safe refusal checks.
 
-The source serve flags now pass run identity/manifest hash, owned artifact root and exact origin into server settings; `VOICELAB_NONCE` remains the canonical per-launch nonce. Optional `--mock-fault-policy <operator-approved-policy.json>` loads a bounded mock-only JSON object into `Settings.mock_fault_policy`; absent policy stays disabled. These are source interfaces, not evidence that a listener, policy or experiment has run.
+The following listener/UI sequence remains an operator recipe pending joined browser evidence. Claim and immediately check separate loopback relay/frontend ports with agent-ports before starting listeners. For PB-M6-R03 use only M6-owned ports 22300–22399. Web dependency setup/build belongs to the web owner; use its reviewed pinned dependencies and build evidence. Do not assume the Python bootstrap installs Node packages or Chromium.
+
+Set `VOICELAB_NONCE` to an operator-chosen per-launch 16–128 character URL-safe ASCII value and `VOICELAB_ALLOWED_ORIGIN` to the exact frontend origin, for example `http://127.0.0.1:<claimed-frontend-port>`. Supply an absolute owned runtime directory with `--artifact-root`. Do not put provider keys into the browser or repository.
+
+```powershell
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode mock --port <claimed-relay-port> --port-claim <existing-claim-receipt> --run-id <frozen-run-id> --run-manifest-hash <manifest-file-sha256> --artifact-root <absolute-owned-runtime-root> --allowed-origin http://127.0.0.1:<claimed-frontend-port>
+```
+
+Set `VOICELAB_WEB_PORT` to the checked frontend port and run `npm --prefix "$project/web" run dev` after authorized dependency setup. Enter `ws://127.0.0.1:<claimed-relay-port>/ws` and the launch nonce in the UI. Select an arm, Start, and use the labeled typed stimulus: `hours`, `list slots`, `select slot 1`, `confirm`, `status`. Unknown wording asks clarification. Interrupt, Simulate disconnect, explicit retry, End, task journal and trace inspection are implemented in source. Microphone capture does not transcribe audio in mock mode. The saved-evidence inspector requires same-origin serving; a separate Vite origin can display an incomplete-serving refusal. The browser tests use test-only same-origin composition; this recipe does not claim that production CLI composition exists or has passed. See [browser notes](web/README.md).
+
+The serve flags pass run identity/manifest hash, owned artifact root and exact origin into server settings; `VOICELAB_NONCE` remains the canonical per-launch nonce. `--artifact-root` is the actual root CLI input; do not rely on `VOICELAB_ARTIFACT_ROOT` to override it. Optional `--mock-fault-policy <operator-approved-policy.json>` loads a bounded mock-only JSON object into `Settings.mock_fault_policy`; absent policy stays disabled. CLI help/refusal checks do not establish that a listener, policy or experiment has run.
 
 Expected source behavior is a guarded task update and diagnostic tone for each admitted typed request, with no provider egress. This paragraph is an implementation description, not actual example execution output.
 
@@ -47,7 +58,7 @@ V mock uses a documented native wire parser subset and synthetic tool proposals.
 
 | Evidence | V | C | K |
 |---|---|---|---|
-| Keyless source path | Implemented; unexecuted | Implemented; unexecuted | Implemented; unexecuted |
+| Keyless source path | Implemented; full UI journey pending | Implemented; full UI journey pending | Implemented; full UI journey pending |
 | Receipt/render p50/p95 | Not yet measured | Not yet measured | Not yet measured |
 | Spoken-task correctness | Unknown; tone is not speech | Unknown; tone is not speech | Not applicable (control); spoken correctness unknown |
 | Cancellation/recovery/soak | Runtime unverified | Runtime unverified | Runtime unverified |
@@ -61,27 +72,30 @@ Raw receipt/render onset, calibrated render, correctness-qualified conditional l
 
 SQLite reservations occur atomically before each possible attempt, including separate C STT/TTS component attempts. Mock requests have an explicit zero-provider basis. Unknown and interrupted reservations remain exposure; duplicate/late usage becomes append-only evidence and cannot refund an immutable unknown. A bound violation halts subsequent admission. Known cost, unknown exposure and estimated components stay separate; rates use captured input, rendered output and elapsed session denominators, with zero denominators undefined. No live budget is approved and no current provider tariff is certified.
 
-## Artifact analysis commands — later use (not yet executed)
+## Artifact analysis and access gates
 
-These analysis scripts consume saved approved synthetic observations. The local package must first be installed in an authorized environment. A separate explicitly activated browser driver is described below; nothing here has been executed.
+Inspect the actual installed interfaces with these non-listening help commands:
 
-```text
-uv run python scripts/eval.py --manifest run.json --rows turns.jsonl --ledger ledger.json --out results
-uv run python scripts/calibrate.py --observations calibration-repeats.json --out calibration-analysis.json
-uv run python scripts/soak.py --observations soak-observations.json --out soak-analysis.json
-uv run python scripts/audit_split.py --manifest split-manifest.json
-uv run python scripts/demo.py
+```powershell
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli eval --help
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli run --help
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli calibrate --help
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli soak --help
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli audit-split --help
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli demo --help
 ```
 
-`eval.py` writes deterministic `results.json`, `results.jsonl`, `results.md` and `ledger-summary.md` from fixed manifest timestamps and hashed input bytes. It requires canonical schema v1, every scheduled logical turn in `scheduled_turns`, and one supplied row per observed logical turn. Complete all-started headlines additionally require matching `turn_assignments` for every scheduled ID and resolved admission evidence. Each assignment pins `logical_turn_id`, `trial_id`, `arm`, `cohort`, `network_profile`, `model_version`, optional task/family/pair, and an independently referenced admission status. `not_started`/`refused` need an admission evidence reference; scheduling alone proves neither. Ledger terminal/dispatched attempts count as start evidence; reservation-only ambiguity retains a potential start but withholds completeness. Missing rows are explicitly synthesized as missing-terminal diagnostics in assigned cohorts. Conflicting terminal/assignment metadata is rejected. `pair_id` identifies a prespecified paired turn position, not an entire multi-turn task. Cost denominators are optional `manifest.audio` fields `captured_input_seconds`, `rendered_output_seconds`, `elapsed_session_seconds`; absent values stay undefined. No report artifacts have been generated here.
+The report generator can write deterministic `results.json`, `results.jsonl`, `results.md` and `ledger-summary.md` from authorized inputs. Direct `eval --manifest ... --rows ... --ledger ... --out ...` is deliberately refused because the CLI has no actual read verifier. `--bundle` is also subject to PublicReadAccess and external rights/custody authority; supplying a path or hash cannot grant access. A saved-artifact CLI report remains blocked until genuine authority exists. Inline team-authored public-development fixtures can exercise the pure report APIs through supported dependency injection; they are not a bypass or live/heldout evidence.
 
-`calibrate.py` analyzes actual saved repeats (30 required) and reports internal error separately from unknown acoustic uncertainty. `soak.py` analyzes saved resource/coverage observations. `audit_split.py` checks each declared family, speaker and interruption dimension separately; it cannot certify independent custody.
+Canonical reports require schema v1, every scheduled logical turn in `scheduled_turns`, and one supplied row per observed logical turn. Complete all-started headlines additionally require matching `turn_assignments` for every scheduled ID and resolved admission evidence. Each assignment pins `logical_turn_id`, `trial_id`, `arm`, `cohort`, `network_profile`, `model_version`, optional task/family/pair, and an independently referenced admission status. `not_started`/`refused` need an admission evidence reference; scheduling alone proves neither. Ledger terminal/dispatched attempts count as start evidence; reservation-only ambiguity retains a potential start but withholds completeness. Missing rows are explicitly synthesized as missing-terminal diagnostics in assigned cohorts. Conflicting terminal/assignment metadata is rejected. `pair_id` identifies a prespecified paired turn position, not an entire multi-turn task. Cost denominators are optional `manifest.audio` fields `captured_input_seconds`, `rendered_output_seconds`, `elapsed_session_seconds`; absent values stay undefined. No saved-artifact report is claimed by the environment baseline.
 
-`scripts/browser_harness.py calibrate|soak --manifest harness.json --activation-reference <later-approval> --out observations.json` is actual bounded Playwright orchestration source. It requires the optional validation dependencies/browser installation, approved synthetic WAV/hash/rights, two existing port claim receipts, immediately checked registered localhost URLs, and the operator nonce. It does not start relay/frontend services. Calibration drives render-graph repeats, actual application worklet anchors, a deliberately past scheduling control, injected offset rejection and cancel/epoch controls. Soak drives three contexts and a refused fourth attempt, up to 200 attempted turns/30 minutes, interruptions/reconnect attempts and two-second diagnostic sampling. It records actions separately from trace-audited outcomes; unavailable metrics stay unknown. Post-End browser handle and worklet queue proofs still require actual trace/instrumentation audit. See [limitations](docs/LIMITATIONS.md), [operations](docs/OPERATIONS.md), and the [planned demo](docs/DEMO.md).
+`calibrate.py` and `soak.py` delegate to guarded browser harness operations. Calibration requires `--manifest`, `--activation-reference`, `--out` and `--phase pre|post`; soak uses the first three plus optional `--profile full|short`. They do not accept `--observations`. A manifest or activation string alone does not supply missing rights/read authority, fixture approval or claimed listeners. `audit_split.py` checks each declared family, speaker and interruption dimension separately only through the authorized read context; it cannot certify independent custody.
+
+`scripts/browser_harness.py` exposes those same guarded calibration/soak interfaces (including required calibration `--phase`). It requires the optional validation dependencies/browser installation, approved synthetic WAV/hash/rights, two existing port claim receipts, immediately checked registered localhost URLs, and the operator nonce. It does not start relay/frontend services. Calibration source drives render-graph repeats, actual application worklet anchors, a deliberately past scheduling control, injected offset rejection and cancel/epoch controls. Soak source drives three contexts and a refused fourth attempt, up to 200 attempted turns/30 minutes, interruptions/reconnect attempts and two-second diagnostic sampling. It records actions separately from trace-audited outcomes; unavailable metrics stay unknown. Post-End browser handle and worklet queue proofs still require actual trace/instrumentation audit. See [limitations](docs/LIMITATIONS.md), [operations](docs/OPERATIONS.md), and the [planned demo](docs/DEMO.md).
 
 ## Evaluation handoff
 
-Evaluation source prepares the seeded 40-clean/8-fault balanced AB/BA task plan plus separate K controls, validates fixture/license/freeze/custody bindings, and assembles saved trace/ledger/journal/adjudication evidence into canonical reporter inputs. Raw driver events retain observed server/session/transport IDs in a correlation sidecar; attempted actions and DOM completion do not prove server starts, browser latency or spoken correctness. Default CLI assembly supplies no independent oracle/release authority. Root `voicelab run` is a later-activation mock/dev driver composition requiring an exact frozen plan, gate bundle, activation reference, port checks and actual per-task fixture bindings. See [evaluation contracts and commands](docs/EVALUATION.md). No evaluation command has been run.
+Evaluation source prepares the seeded 40-clean/8-fault balanced AB/BA task plan plus separate K controls, validates fixture/license/freeze/custody bindings, and assembles saved trace/ledger/journal/adjudication evidence into canonical reporter inputs. Raw driver events retain observed server/session/transport IDs in a correlation sidecar; attempted actions and DOM completion do not prove server starts, browser latency or spoken correctness. Default CLI assembly supplies no independent oracle/release authority. Root `voicelab run` is a later-activation mock/dev driver composition requiring an exact frozen plan, gate bundle, activation reference, port checks and actual per-task fixture bindings. See [evaluation contracts and commands](docs/EVALUATION.md). CLI help and direct-report refusal were checked; no evaluation driver or saved-artifact report was run in this slice.
 
 `eval.py` and root `voicelab eval` now delegate to the same evaluation `report` entrypoint and canonical reporter. Alongside the existing report files, it emits `failures.json`, `numeric-fragments.json`, `README-results.md` and `LIMITATIONS-results.md` from the same report object and exact input hashes. These separate fragments do not silently rewrite this README or product limitations. Optional EvidenceRecord/source-hash inputs bind original trace/audio/ledger/oracle provenance and canonical result hashes. No report or numeric fragment has been generated. Incomplete costs permit only clearly labeled known-part rates, with unknown liability alongside them; no complete cost/affordability winner follows.
 
@@ -93,4 +107,4 @@ An injected trusted synchronous confirmation verifier must evaluate the current 
 
 ## Limits and authorship
 
-The source was authored by AI agents and inspected statically under Roy's explicitly enabled construction mode. Product/runtime readiness, independent fixture custody, licensed spoken assets, provider entitlement/rights/pricing, calibrated offline faults/soak and the authorized live paired comparison remain open. This is not completed M6 or independent product acceptance. No public deployment, remote publication or paid calls are implied.
+The source was authored by AI agents, initially inspected under static-only construction, then exercised by the bounded Python baseline documented above. Independent review and combined-tree verification remain separate. Product/runtime readiness, independent fixture custody, licensed spoken assets, provider entitlement/rights/pricing, calibrated offline faults/soak and the authorized live paired comparison remain open. This is not completed M6 or independent product acceptance. No public deployment, remote publication or paid calls are implied.

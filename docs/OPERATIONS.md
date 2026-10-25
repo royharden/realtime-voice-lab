@@ -1,16 +1,80 @@
-# Local operation and deferred activation
+# Local operation
 
-The source was constructed in Dirty Mode. No dependency resolution, installation,
-server/browser/database start, test, calibration or measurement has been performed.
-The instructions below are for a later authorized activation, after Dirty Mode closes.
+PB-M6-R03 runs in Normal mode. The initial source was constructed with static checks
+only; the environment candidate now has a reproducible locked Python install,
+51 collected tests and 48 passing non-browser baseline tests. See
+[validation](VALIDATION.md) for exact commands and scope. A baseline pass is not
+browser, Docker, device, live-provider or independent product acceptance. The
+listener and browser recipes below await joined journey evidence from RV1.
+
+## Bootstrap and inspect the installed CLI
+
+Use PowerShell 7 and uv 0.11.19. Keep cwd at the outer shell and use the absolute
+product worktree path:
+
+```powershell
+$project = '<absolute-product-worktree>'
+& "$project/scripts/bootstrap.ps1"
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli --help
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --help
+```
+
+Bootstrap installs CPython 3.12.13 under `.agent-work/python` and installs both test
+and validation extras into `.venv` from `uv.lock` using `--locked`. It does not
+change global Python registration, install browser binaries, start listeners or
+enable providers. Do not change an environment another seat has frozen for review;
+make a separate worktree-local locked environment instead.
+
+The following are safe negative checks, not working server/report recipes. Use an
+actually nonexistent receipt path. They return exit 2 before listener/provider
+activation or artifact reads:
+
+```powershell
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode live
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode mock --port 22300 --port-claim '<nonexistent-receipt>'
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli eval --manifest not-opened-manifest.json --rows not-opened-rows.jsonl --ledger not-opened-ledger.json --out '<unused-output-path>'
+```
+
+Expected refusals are, respectively: mode `live` is not a CLI choice; a real claim
+receipt must exist; direct path reporting has no actual read verifier. The port
+number in the refusal check is not a port grant. Help for `eval`, `run`, `calibrate`,
+`soak`, `audit-split` and `demo` is available without starting an experiment.
+
+`calibrate` requires `--manifest`, `--activation-reference`, `--out` and
+`--phase pre|post`. `soak` requires the first three and optionally
+`--profile full|short`. These guarded browser operations do not accept
+`--observations`. `run` additionally requires a frozen `--trial-plan`,
+`--gate-bundle`, `--artifact-root` and `--freeze-hash`. These flags do not grant
+missing rights, public-read authority, custody release or live spending.
+
+Saved-artifact report execution remains blocked until genuine PublicReadAccess
+and rights/access authority are supplied. `--bundle` does not bypass them. Pure
+converter/assembly/report APIs may be checked with inline team-authored synthetic
+public-development fixtures and supported dependency injection. Do not invent a
+permissive verifier, diagnostic read-root bypass or heldout/live acceptance.
+
+## Later listener and browser activation
 
 Claim and check a localhost port with the shared agent-ports registry before serving.
-The CLI requires an explicit port in 20000–29999 and an existing port-claim receipt.
+The CLI accepts an explicit port in 20000–29999 and an existing port-claim receipt;
+PB-M6-R03 authority narrows this to M6-owned 127.0.0.1 ports 22300–22399.
 Use `voicelab serve --help` for exact arguments. The factory is
 `voicelab.server.app:create_app`; host binding is 127.0.0.1. Keep frontend and relay
 on separately claimed ports. Set `VOICELAB_ALLOWED_ORIGIN` to the frontend's exact
 loopback HTTP origin, including its claimed port. There is no implicit origin or
 port. Missing configuration and wildcard origins are refused before activation.
+An existing receipt file alone is not a fresh ownership check.
+
+```powershell
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode mock --port <claimed-relay-port> --port-claim <existing-receipt> --run-id <frozen-run-id> --run-manifest-hash <manifest-sha256> --artifact-root <absolute-owned-root> --allowed-origin http://127.0.0.1:<claimed-frontend-port>
+```
+
+After web-owner dependency/build setup, set `VOICELAB_WEB_PORT` and use
+`npm --prefix "$project/web" run dev` on the separately claimed frontend port.
+The baseline UI's saved-evidence inspector requires same-origin serving; a
+separate Vite origin can show an incomplete-serving refusal. The UI tests supply
+test-only same-origin composition. CLI help and this recipe do not prove that
+production same-origin hosting exists or that the joined UI has passed.
 
 Set `VOICELAB_NONCE` to an operator-created random 16–128 character local launch nonce.
 Enter the same value in the UI. It is a local cross-origin request guard, not a provider
@@ -279,12 +343,14 @@ detail.code/error.code without echoing validation inputs. Artifact root/ancestor
 children cannot currently be symlinks/junctions, linked files, traversal, drives/UNC,
 ADS or reserved-name escapes. Keep the root under one operator with no competing
 filesystem writer; these source checks do not prove race-free filesystem replacement.
-The later listener must additionally bound transport frames to the application limit
-and suppress/redact URL access logging, because the WebSocket query carries its local
-nonce. Those root-listener settings are owned by the Integrator; no listener ran here.
+The root CLI configures the WebSocket frame limit and disables URL access logging;
+these settings must remain intact because the query carries the local nonce.
+No listener ran in this documentation/environment slice.
 
-`VOICELAB_ARTIFACT_ROOT` selects local runtime artifacts (default `.agent-work/runtime`
-relative to activation cwd). Startup creates task/attempt SQLite files and bounded
+The root CLI's `--artifact-root` selects local runtime artifacts (default
+`.agent-work/runtime` relative to activation cwd); supply an absolute owned path
+when keeping cwd at the outer shell. `VOICELAB_ARTIFACT_ROOT` is a separate factory
+configuration interface, not a root CLI override. Startup creates task/attempt SQLite files and bounded
 metadata traces there. Use an operator-controlled directory, outside public exports;
 do not point it at a symlink, existing sensitive data or another project's directory.
 No artifact write happens merely by importing source. End closes adapter/task/trace
@@ -305,12 +371,13 @@ as rendered. Unknown/partial playback produces at most one explicit repeat reque
 no audio is replayed. Retry cannot silently grant microphone capture. End or reload
 abandons rather than inventing continuity.
 
-Deferred checks: resolve pinned dependencies and locks; run Python/TypeScript schema
-checks and task/accounting/security tests; exercise UI, wire faults, fourth-session
+Deferred checks beyond the executed Python baseline: TypeScript schema/build and
+joined candidate verification; exercise UI, broader wire faults, fourth-session
 refusal, stale cancellation, five-second reconnect and cleanup; calibrate actual audio
 hardware and run bounded soak; obtain licensed speech and independent custody; refresh
 capabilities/prices and get explicit live budget authorization; perform independent
-product acceptance. Until then all runtime behavior and measured outcomes are unknown.
+product acceptance. The baseline establishes only its selected invariants; broader
+runtime behavior and measured outcomes remain unknown.
 
 ## Licensed fixed PCM K source configuration
 
@@ -356,5 +423,6 @@ Session evidence.session_attempts is an exact-session projection of the saved
 run ledger, with reservation-time trial/logical/transport/epoch lineage. Old missing
 fields remain unknown; do not guess using matching transport names or whole-run
 snapshot totals. The closed ServerMessage payload registry (contracts.py, see
-contracts/INTERFACES.md) is source only: no emission has been exercised against it,
-so a real frame that it refuses would end the session as protocol_error.
+contracts/INTERFACES.md) is exercised by the selected Python mock journey baseline.
+That is not complete browser/wire coverage; an invalid real frame still ends the
+session as protocol_error.
