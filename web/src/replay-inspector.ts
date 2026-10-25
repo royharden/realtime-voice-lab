@@ -47,8 +47,8 @@ export function mountReplayInspector(root:HTMLElement,options:{reviewBinding:()=
     const role=q<HTMLSelectElement>('role').value,row=files.get(role);q('rows').replaceChildren();q('original').textContent='No selected bytes.';pages=1;
     if(!row){q('scope').textContent='Missing selected bytes are unknown, never a successful replay.';q('page').textContent='No records';q<HTMLButtonElement>('previous').disabled=true;q<HTMLButtonElement>('next').disabled=true;return;}
     try{
-      const isLines=/\.jsonl$/i.test(row.ref.path)||['input:turns','input:trace','input:oracle','input:evidence'].includes(role);
-      const plainText=!isLines&&!/\.json$/i.test(row.ref.path);
+      const isLines=/\.jsonl$/i.test(row.ref.path??'')||['input:turns','input:trace','input:oracle','input:evidence'].includes(role);
+      const plainText=!isLines&&!/\.json$/i.test(row.ref.path??'');
       let originals=isLines?row.text.split(/\r?\n/).filter(line=>line.trim()):[row.text];if(originals.length>100000)throw new Error('Saved record count exceeds inspector bound');
       let values:unknown[]=plainText?[{status:'saved_text_content_only'}]:originals.map(raw=>{try{return JSON.parse(raw) as unknown;}catch{return null;}});
       const collection=q<HTMLSelectElement>('collection'),selectedCollection=collection.value;collection.replaceChildren(new Option('Whole saved object / JSONL order','0'));

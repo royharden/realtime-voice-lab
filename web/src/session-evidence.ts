@@ -1,3 +1,4 @@
+import {httpResponse} from './boundary';
 import {evidenceIdentifier,projectSessionEvidence} from './session-evidence-model';
 import type {EvidenceOwner} from './session-evidence-model';
 const MAX_BYTES=8*1024*1024,TIMEOUT_MS=10000;
@@ -6,7 +7,7 @@ type RequestHandle={controller:AbortController;timer:ReturnType<typeof setTimeou
 // Secrets and response bytes stay private to this mounted instance. No telemetry/export API.
 export function mountSessionEvidence(root:HTMLElement,options:{canInspect:()=>boolean}){
   root.className='card session-evidence';
-  root.innerHTML='<p class="eyebrow">PROTECTED SAVED METADATA</p><h2>Post-End session evidence</h2><p>Inspect only the admitted session after End and cleanup. Saved hashes are references, not verified artifact bytes. No audio is loaded or played.</p><div class="actions"><button data-read>Inspect / refresh</button><button data-clear>Clear evidence and authorization</button></div><p data-status role="status">No owned admission.</p><pre data-owner></pre><div data-results></div><p class="muted">Run snapshots are not session totals. Missing fields remain null/unknown. No automatic correctness, acoustic, billing or product acceptance claim.</p>';
+  root.innerHTML='<p class="eyebrow">PROTECTED SAVED METADATA</p><h2>Post-End session evidence</h2><p>Inspect only the admitted session after End and cleanup. Saved hashes are references, not verified artifact bytes. No audio is loaded or played.</p><div class="actions"><button data-read data-testid="evidence-read">Inspect / refresh</button><button data-clear>Clear evidence and authorization</button></div><p data-status data-testid="evidence-status" role="status">No owned admission.</p><pre data-owner></pre><div data-results data-testid="evidence-results"></div><p class="muted">Run snapshots are not session totals. Missing fields remain null/unknown. No automatic correctness, acoustic, billing or product acceptance claim.</p>';
   const status=root.querySelector<HTMLElement>('[data-status]')!,ownerView=root.querySelector<HTMLElement>('[data-owner]')!,results=root.querySelector<HTMLElement>('[data-results]')!,read=root.querySelector<HTMLButtonElement>('[data-read]')!;
   let lease:Lease|undefined,generation=0,ended=false,endObservation='unknown',lastEpochs:{connection_epoch:number|null;response_epoch:number|null}={connection_epoch:null,response_epoch:null};
   const pending=new Set<RequestHandle>();
@@ -59,7 +60,7 @@ export function mountSessionEvidence(root:HTMLElement,options:{canInspect:()=>bo
       while(true){const part=await request.reader.read();if(!current())return;if(part.done)break;bytes+=part.value.byteLength;if(bytes>MAX_BYTES)throw new Error('evidence_byte_bound');chunks.push(part.value);}
       const buffer=new Uint8Array(bytes);let offset=0;for(const chunk of chunks){buffer.set(chunk,offset);offset+=chunk.byteLength;}
       let parsed:unknown;try{parsed=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(buffer));}catch{throw new Error('evidence_invalid_json');}
-      const projected=projectSessionEvidence(parsed,owned.owner);if(!current())return;
+      const projected=projectSessionEvidence(httpResponse('session_evidence',parsed),owned.owner);if(!current())return;
       show(projected);status.textContent='Received saved metadata. Unknowns preserved; whole-run snapshot replaces previous view. Runtime/acoustic/correctness acceptance remains unknown.';
     }catch(error){
       if(own===generation&&lease===owned){const allowed=['evidence_alias_or_snapshot_unavailable','evidence_authorization_refused','evidence_http_error','evidence_content_type','evidence_byte_bound','evidence_body_unavailable','evidence_invalid_json','metadata_structure_bound','evidence_identity_mismatch','evidence_schema_version'];

@@ -1,4 +1,4 @@
-import {SHAPES,CONSTANTS,LITERALS,CUSTOM_VALIDATORS_UNEXECUTED} from './generated/contracts';
+import {SHAPES,CONSTANTS,LITERALS,CUSTOM_VALIDATORS_UNEXECUTED,HTTP_RESPONSE_MODELS} from './generated/contracts';
 import type {CanonicalTypes,ClientMessage,ServerMessage,ServerMessageVariant} from './generated/contracts';
 interface Rule {kind:string;name?:string;values?:unknown[];items?:Rule[];item?:Rule;key?:Rule;value?:Rule;fields?:Record<string,{required:boolean;rule:Rule}>;min_length?:number;max_length?:number;ge?:number;gt?:number;le?:number;lt?:number;pattern?:string}
 const shapes=SHAPES as Record<string,Rule>;
@@ -91,3 +91,17 @@ export function serverVariant(raw:string):ServerMessageVariant {
 export const SERVER_PAYLOAD_REGISTRY={version:CONSTANTS.SERVER_PAYLOAD_REGISTRY_VERSION,types:[...SERVER_VARIANTS.keys()],event_kinds:[...EVENT_VARIANTS.keys()],observation:'structural_only',custom_validators:'not_executed'} as const;
 export function isArm(value:unknown):value is CanonicalTypes['Hello']['arm'] {return (LITERALS.Hello_arm as readonly unknown[]).includes(value);}
 export {CUSTOM_VALIDATORS_UNEXECUTED};
+
+// Route/model mapping is generated from Python's canonical HTTP_RESPONSE_MODELS.
+export type HttpRoute = keyof typeof HTTP_RESPONSE_MODELS;
+export function httpResponse<R extends HttpRoute>(route:R,value:unknown):CanonicalTypes[(typeof HTTP_RESPONSE_MODELS)[R]] {
+  if(!Object.hasOwn(HTTP_RESPONSE_MODELS,route))throw new Error('http_route_unknown');
+  const result=readStructural(HTTP_RESPONSE_MODELS[route],value,400000);
+  return result as CanonicalTypes[(typeof HTTP_RESPONSE_MODELS)[R]];
+}
+export function httpRefusal(value:unknown){
+  const result=readStructural('HttpErrorBody',value);
+  if(result.detail.code!==result.error.code)throw new Error('http_error_code_mismatch');
+  return result;
+}
+export const HTTP_PAYLOAD_REGISTRY={version:CONSTANTS.HTTP_RESPONSE_REGISTRY_VERSION,routes:HTTP_RESPONSE_MODELS,observation:'structural_only',custom_validators:'not_executed'} as const;

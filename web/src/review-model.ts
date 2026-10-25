@@ -62,7 +62,7 @@ function canonical(value:unknown,depth=0):string {
 export async function sha256(bytes:ArrayBuffer|Uint8Array){const value=bytes instanceof Uint8Array?new Uint8Array(bytes).buffer:bytes;const digest=await crypto.subtle.digest('SHA-256',value);return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');}
 export async function packetDigest(packet:ReviewPacket){if(new TextEncoder().encode(canonical(packet)+'\n').byteLength>512000)throw new Error('Canonical D5 packet metadata exceeds512000 bytes');const body:Record<string,unknown>={};for(const [key,value] of Object.entries(packet))if(key!=='packet_hash')body[key]=value;return sha256(new TextEncoder().encode(canonical(body)+'\n'));}
 export const ROLE_BINDING:Record<Role,typeof BINDING_KEYS[number]>={input_audio:'input_audio_hash',rendered_audio:'rendered_audio_hash',confirmation_audio:'confirmation_audio_hash',confirmation:'confirmation_evidence_hash',journal:'journal_hash',trace:'trace_hash'};
-export function itemGaps(item:ReviewItem){const gaps=[...item.evidence_gaps];for(const key of BINDING_KEYS)if(item.bindings[key]===null)gaps.push('Missing binding: '+key);for(const role of ROLES){const ref=item.artifacts[role];if(!ref)gaps.push('Missing artifact: '+role);else if(ref.sha256!==item.bindings[ROLE_BINDING[role]])gaps.push('Binding mismatch: '+role);}return [...new Set(gaps)];}
+export function itemGaps(item:ReviewItem){const gaps=[...(item.evidence_gaps??[])];for(const key of BINDING_KEYS)if(item.bindings[key]===null)gaps.push('Missing binding: '+key);for(const role of ROLES){const ref=item.artifacts[role];if(!ref)gaps.push('Missing artifact: '+role);else if(ref.sha256!==item.bindings[ROLE_BINDING[role]])gaps.push('Binding mismatch: '+role);}return [...new Set(gaps)];}
 export function parseDeclaration(text:string,packet:ReviewPacket):PlaybackDeclaration {
   if(text.length>128000)throw new Error('Playback declaration exceeds bound');requireSafeNumbers(text);const value:unknown=JSON.parse(text);
   const keys=MODEL_FIELDS.PlaybackDeclaration;
@@ -71,7 +71,7 @@ export function parseDeclaration(text:string,packet:ReviewPacket):PlaybackDeclar
   for(const key of ['approval_reference','manifest_reference','custody_reference'])if(!boundedText(value[key]))throw new Error('Declared retention/approval/custody references missing');
   for(const key of ['input_rights_reference','output_rights_reference'])if(value[key]!==null&&!boundedText(value[key]))throw new Error('Malformed declared rights reference');
   const rights=value.role==='rendered_audio'?value.output_rights_reference:value.input_rights_reference;if(!boundedText(rights))throw new Error('Role-specific declared rights reference is required');
-  const item=packet.items.find(item=>item.item_id===value.item_id),ref=item?.artifacts[value.role as Role];
+  const item=packet.items?.find(item=>item.item_id===value.item_id),ref=item?.artifacts[value.role as Role];
   if(!item||!ref||ref.sha256!==value.audio_hash||item.bindings[ROLE_BINDING[value.role as Role]]!==value.audio_hash)throw new Error('Declaration packet/item/role/audio hash mismatch');
   const until=Date.parse(value.retention_until_utc);if(until<=Date.now()||until>Date.now()+30*86400000)throw new Error('Playback expiry must be current and bounded to thirty days');
   return value as unknown as PlaybackDeclaration;
@@ -79,6 +79,7 @@ export function parseDeclaration(text:string,packet:ReviewPacket):PlaybackDeclar
 export async function declarationDigest(declaration:PlaybackDeclaration){const body:Record<string,unknown>={};for(const [key,value] of Object.entries(declaration))if(key!=='declaration_hash')body[key]=value;return sha256(new TextEncoder().encode(canonical(body)+'\n'));}
 export function playbackGrant(declaration:PlaybackDeclaration|undefined,itemId:string,role:Role,hash:string){if(!declaration||declaration.item_id!==itemId||declaration.role!==role||declaration.audio_hash!==hash||Date.parse(declaration.retention_until_utc)<=Date.now())throw new Error('Current hash-bound D5 role declaration required');return declaration;}
 export function audioBlob(bytes:ArrayBuffer,grant:PlaybackDeclaration):Blob {
+  if(typeof grant.sample_rate!=='number'||!Number.isSafeInteger(grant.sample_rate)||grant.sample_rate<8000||grant.sample_rate>192000)throw new Error('Declared sample rate unavailable');
   const view=new DataView(bytes);let pcmBytes=bytes.byteLength;
   const blockAlign=grant.channels*2;
   if(grant.container==='raw_pcm'){
