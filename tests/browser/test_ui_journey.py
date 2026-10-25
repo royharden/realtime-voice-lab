@@ -33,7 +33,7 @@ CHROMIUM_ARGS = ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-fo
 @asynccontextmanager
 async def ui(server: dict, arm: str = 'V'):
     """Open the real UI, enter relay URL + nonce, pick mock/arm, start, await listening."""
-    blocked, console, requests = [], [], []
+    blocked, console, requests, pageerrors = [], [], [], []
     allowed = {server['page_origin'], server['relay_origin']}
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
@@ -53,6 +53,7 @@ async def ui(server: dict, arm: str = 'V'):
             await context.add_init_script(path=str(PROBE))
             page = await context.new_page()
             page.on('console', lambda message: console.append(message.text))
+            page.on('pageerror', lambda error: pageerrors.append(str(error)))
             page.on('request', lambda request: requests.append((request.method, request.url)))
             await page.goto(server['page_origin'] + '/', wait_until='domcontentloaded', timeout=10000)
             await page.locator('#url').fill(server['relay_url'])
@@ -62,7 +63,16 @@ async def ui(server: dict, arm: str = 'V'):
             # Several <details> exist (stimulus, review, replay); open only the stimulus panel.
             await page.locator('details:has(#stimulus)').evaluate('(element)=>element.open=true')
             await page.locator('#start').click()
-            await wait_state(page, ['listening'], timeout=8000)
+            try:
+                await wait_state(page, ['listening'], timeout=8000)
+            except Exception as error:
+                diagnostic = await page.evaluate('''()=>({state:document.querySelector('#state')?.textContent,
+                  error:document.querySelector('#error')?.textContent,
+                  resources:document.querySelector('#resources')?.textContent})''')
+                diagnostic['pageerrors'] = pageerrors
+                diagnostic['console'] = console[-10:]
+                raise AssertionError('UI startup diagnostic: ' +
+                    json.dumps(diagnostic).replace(server['nonce'], '[redacted]')) from error
             yield page, {'blocked': blocked, 'console': console, 'requests': requests}
         finally:
             await browser.close()
