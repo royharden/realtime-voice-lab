@@ -1,11 +1,13 @@
 """Driver-to-plan joins must retain independent session, boot and epoch identities."""
 from copy import deepcopy
+import hashlib
 import json
 
 import pytest
 
 from voicelab.contracts import parse_server
 from voicelab.evaluation.driver import convert_driver_events
+from voicelab.evaluation.artifacts import canonical_bytes
 from voicelab.harness.browser import BrowserDriver
 
 
@@ -129,6 +131,33 @@ def test_changed_projected_metadata_invalidates_parser_receipt():
     plan, sink = setup()
     received = next(e for e in sink.events if e['kind'] == 'wire_received')
     received['message_metadata']['payload']['boot_id'] = 'substituted-boot'
+    try:
+        result = convert_driver_events([received], plan)
+    except ValueError:
+        return
+    assert result['task_admissions'] == []
+    assert result['issues']
+
+
+@pytest.mark.parametrize('change', ['bad_arm', 'negative_epoch', 'bool_sequence', 'unknown_field', 'negative_budget'])
+def test_rehashed_malformed_projection_still_refuses_closed_schema(change):
+    """what_bug_this_catches: trusting a rehashed parser receipt instead of checking retained types."""
+    plan, sink = setup()
+    received = next(e for e in sink.events if e['kind'] == 'wire_received')
+    metadata = received['message_metadata']
+    if change == 'bad_arm':
+        metadata['payload']['arm'] = 'invented-arm'
+    elif change == 'negative_epoch':
+        metadata['connection_epoch'] = -1
+    elif change == 'bool_sequence':
+        metadata['sequence'] = True
+    elif change == 'unknown_field':
+        metadata['payload']['unregistered_extension'] = 1
+    else:
+        metadata['payload']['admission']['budget_usd'] = '-1'
+    received['wire_validation'] = {'registry': 'server_payload_v1', 'validation': 'passed',
+        'scope': 'producer_wire_validation_before_privacy_projection',
+        'metadata_sha256': hashlib.sha256(canonical_bytes(metadata)).hexdigest()}
     try:
         result = convert_driver_events([received], plan)
     except ValueError:
