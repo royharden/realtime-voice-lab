@@ -1,0 +1,14 @@
+**
+!Dockerfile.eval
+!pyproject.toml
+!src/
+!src/**
+!tests/
+!tests/**
+!evals/
+!evals/**
+!scripts/
+!scripts/docker/
+!scripts/docker/requirements.txt
+**/__pycache__/
+**/*.pyc
