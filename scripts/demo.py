@@ -11,7 +11,7 @@ def storyboard() -> dict:
     """A prospective schedule, with observed-result fields deliberately unset."""
     return {
         'schema_version': 1,
-        'evidence': 'MOCK / TYPED INPUT / SYNTHETIC TONE; storyboard only',
+        'evidence': 'MOCK / TYPED / MUTED / DEVICE-FREE; storyboard only',
         'status': 'not_recorded_not_rehearsed',
         'target_duration_seconds': 120,
         'actual_duration_seconds': None,
@@ -23,23 +23,23 @@ def storyboard() -> dict:
             'Exact UI build and source hashes are pinned.',
             'Independent V/C interrupt, recovery, End and cleanup scenarios work on that build.',
             'Use the tested approved synthetic local launch route; do not fabricate rights/read authority.',
-            'Only owned loopback listeners with fresh port claim/check; fake media only, no real devices.',
+            'Only owned loopback listeners with fresh port claim/check; device-free typed/muted mode, no media permission or real devices.',
             'Video and duration become observed only after a completed actual capture and inspection.',
         ],
         'scenes': [
             {
                 'start_seconds': 0, 'end_seconds': 15, 'title': 'Scope and setup',
                 'actions': [
-                    'Show MOCK, typed-input and diagnostic-tone labels.',
-                    'Explain the fictional appointment task and software fake-media context.',
+                    'Show MOCK / TYPED / MUTED labels; internal PCM is diagnostic, with no audible output.',
+                    'Explain the fictional appointment task and device-free typed session; no microphone or media permission.',
                     'Show that acoustic latency and speech correctness are unmeasured.',
                 ],
-                'observe': 'Pinned local page is initialized; no live mode or physical device.',
+                'observe': 'Pinned local page is initialized; no live mode, microphone capture, device enumeration or microphone permission.',
             },
             {
                 'start_seconds': 15, 'end_seconds': 40, 'title': 'V mock task',
                 'actions': [
-                    'Select V and Start in the already verified fake-media browser.',
+                    'Select Mock and V; Start the independently verified device-free typed path without media permission.',
                     'Submit hours, list slots, select slot 1, yes confirm, status.',
                     'Use Explicit retry between drained responses only when required by the UI.',
                     'Inspect the fictional booking; End and wait for closed with owned handles released.',

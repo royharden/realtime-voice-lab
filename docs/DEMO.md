@@ -1,6 +1,6 @@
 # Mock-only demonstration
 
-The target is a two-minute demonstration of local instrumentation using typed prompts, software fake media and synthetic diagnostic tones. This document and `scripts/demo.py` are a storyboard, not a recording or a measured rehearsal. They do not establish real speech, acoustic latency, a live comparison, heldout evaluation or independent product acceptance. No recorded demo is supplied by this change.
+The target is a two-minute demonstration of local instrumentation using typed prompts and a device-free real worklet graph with muted diagnostic PCM. This document and `scripts/demo.py` are a storyboard, not a recording or a measured rehearsal. They do not establish real speech, acoustic latency, a live comparison, heldout evaluation or independent product acceptance. No recorded demo is supplied by this change.
 
 ## Reproduce the storyboard
 
@@ -22,7 +22,7 @@ Scene boundaries are prospective pacing targets, not measured latencies. If actu
 
 | Target seconds | Visible action | Evidence boundary |
 |---|---|---|
-| 0–15 | Show MOCK, typed-input and diagnostic-tone labels, fictional task and fake-media scope. | No real microphone or device. Acoustic latency and speech correctness remain unmeasured. |
+| 0–15 | Show MOCK / TYPED / MUTED labels, fictional task and device-free scope. | No microphone/media permission or real device; output is muted. Acoustic latency and speech correctness remain unmeasured. |
 | 15–40 | Select V, Start, submit `hours`, `list slots`, `select slot 1`, `yes confirm`, `status`; inspect booking, End and cleanup. | Typed mock journey; displayed task state is not an independent speech oracle. |
 | 40–65 | After closed/cleanup, select C and Start a fresh namespace; repeat the same five prompts. | Same task/inventory, different pinned mock pipeline; no latency winner inferred. |
 | 65–85 | Use the verified interruption point, show booking preserved after commit, Disconnect, Explicit retry, End and observed cleanup. | Button attempts are not applied-fence/recovery proof. Show unknown/refused recovery truthfully. |
@@ -35,13 +35,21 @@ Use Explicit retry between drained responses only when the UI requires it. Do no
 
 The exact serving build, source identity and four asset hashes must be frozen before a recording. Build success alone does not approve the scenario. Capture remains pending until both the independently verified V/C interrupt/recovery/End/cleanup scenarios and the actual tested synthetic local launch route are available. Use that approved route verbatim; do not create a permissive PublicReadAccess object, rights certificate or alternative gate bypass to run a fixture driver.
 
-The ordinary `voicelab serve --mode mock` command currently starts the relay only. The five accepted browser cases used a test-only static mount on the same relay origin. A separate Vite page is not verified same-origin evidence hosting. Until a tested launch route is supplied, this document does not offer a working capture-server command. The metadata-only storyboard commands above remain usable without that route.
+Relay-only remains the default serving mode. The frozen serving successor declares paired `--web-dist` and `--web-manifest` flags to mount an exact bounded public build after relay routes. The following is the corrected prospective command, not a tested launch approval. Do not execute it until the reviewed source, suitable tests and actual launch-route disposition are supplied:
+
+```powershell
+$project = '<approved-frozen-server-checkout>'
+$env:PYTHONPATH = "$project/src"
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode mock --host 127.0.0.1 --port <own-claimed-port> --port-claim <real-receipt> --allowed-origin http://127.0.0.1:<same-port> --artifact-root <fresh-owned-runtime> --web-dist <exact-device-free-dist> --web-manifest <matching-build-record.json>
+```
+
+The same actual port serves UI and relay; do not reuse another owner's claim or manufacture a second receipt. Both web flags are required together and the closed build inventory must match every served asset. Use the existing ephemeral per-launch nonce mechanism without printing or persisting it. `python -m voicelab.cli` is the supported module entrypoint. A separate Vite page is not same-origin evidence hosting. The older default relay-only command and test-only static fixture do not prove this successor launch recipe works. Storyboard generation remains usable without any launch.
 
 Before any authorized listener, claim and immediately check its project-owned loopback port. Use only the assigned local reservation; a receipt file or an environment flag alone is not ownership proof. Do not share another test owner's mutable server, port, journal or browser context. Keep the nonce out of URLs shown in recordings, DOM exports, logs, manifests and command arguments; enter the per-launch nonce through the existing local control. Do not read or supply provider keys.
 
-A capture browser must be explicitly configured for software fake media before Start. Do not press Start in an ordinary browser under a no-device grant: the UI normally requests microphone permission. The existing test recipe uses Chromium fake-device/fake-UI flags and a team-generated silent WAV; it does not activate a physical microphone. Silence and diagnostic tones have no speaker identity and cannot stand in for licensed speech fixtures or heldout cells. An ordinary screen recording may contain no audio; disclose that rather than dubbing synthetic tones with speech.
+The device-free successor explicitly labels Mock as TYPED / MUTED. Its intended Start path does not call getUserMedia, enumerate devices or request microphone permission; the real AudioWorklet graph processes internal diagnostic PCM through muted output. Capture must use that exact reviewed build and keep those media APIs forbidden. The older build requested media during Start and is not a substitute, even with fake-device flags. Never select Live or activate the retained real-media path. Muted PCM has no speaker identity and cannot stand in for licensed speech fixtures or heldout cells. A screen recording must disclose its silent output; do not dub speech or imply audible tone playback.
 
-If capture is supported after the gate passes, retain the original local recording and a separate receipt identifying exact source/build, recording mechanism, fake-media configuration, observed start/end/duration, interruptions/recovery outcomes, post-End API-handle observations and any incomplete step. Label it MOCK / TYPED INPUT / SYNTHETIC TONE throughout. A failed or partial capture is an incomplete artifact, not a successful two-minute demo. Keep outputs under an explicitly owned local artifact directory; publication remains separate.
+If capture is supported after the gate passes, retain the original local recording and a separate receipt identifying exact source/build, recording mechanism, fake-media configuration, observed start/end/duration, interruptions/recovery outcomes, post-End API-handle observations and any incomplete step. Label it MOCK / TYPED / MUTED / DEVICE-FREE throughout. A failed or partial capture is an incomplete artifact, not a successful two-minute demo. Keep outputs under an explicitly owned local artifact directory; publication remains separate.
 
 ## Operational evidence and open work
 
