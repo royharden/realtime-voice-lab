@@ -33,14 +33,15 @@ Use Explicit retry between drained responses only when the UI requires it. Do no
 
 ## Launch and capture gate
 
-The exact serving build, source identity and four asset hashes must be frozen before a recording. Build success alone does not approve the scenario. Capture remains pending until both the independently verified V/C interrupt/recovery/End/cleanup scenarios and the actual tested synthetic local launch route are available. Use that approved route verbatim; do not create a permissive PublicReadAccess object, rights certificate or alternative gate bypass to run a fixture driver.
+The exact serving build, source identity and four asset hashes must be frozen before a recording. Build success alone does not approve the scenario. Capture remains pending until independently reviewed V/C interrupt/recovery/End/cleanup evidence covers the new backend, the actual supported synthetic local launch route is tested, and an explicit scoped capture grant is issued. Earlier browser evidence stays bound to its original backend/build; it cannot be relabeled as a new-backend run. Use that approved route verbatim; do not create a permissive PublicReadAccess object, rights certificate or alternative gate bypass to run a fixture driver.
 
-Relay-only remains the default serving mode. The frozen serving successor declares paired `--web-dist` and `--web-manifest` flags to mount an exact bounded public build after relay routes. The following is the corrected prospective command, not a tested launch approval. Do not execute it until the reviewed source, suitable tests and actual launch-route disposition are supplied:
+Relay-only remains the default serving mode. The pinned no-probe source candidate implements paired `--web-dist` and `--web-manifest` flags to mount an exact bounded public build after relay routes. The following is the corrected prospective command, not a tested launch approval. Do not execute it until the reviewed source, suitable tests, actual new-backend launch/browser evidence and explicit scoped runtime grant are supplied:
 
 ```powershell
 $project = '<approved-frozen-server-checkout>'
 $env:PYTHONPATH = "$project/src"
-& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode mock --host 127.0.0.1 --port <own-claimed-port> --port-claim <real-receipt> --allowed-origin http://127.0.0.1:<same-port> --artifact-root <fresh-owned-runtime> --web-dist <exact-device-free-dist> --web-manifest <matching-build-record.json>
+$port = <own-claimed-port>
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode mock --host 127.0.0.1 --port $port --port-claim <real-receipt> --allowed-origin "http://127.0.0.1:$port" --artifact-root <fresh-owned-runtime> --web-dist <exact-device-free-dist> --web-manifest <matching-build-record.json>
 ```
 
 The same actual port serves UI and relay; do not reuse another owner's claim or manufacture a second receipt. Both web flags are required together and the closed build inventory must match every served asset. Use the existing ephemeral per-launch nonce mechanism without printing or persisting it. `python -m voicelab.cli` is the supported module entrypoint. A separate Vite page is not same-origin evidence hosting. The older default relay-only command and test-only static fixture do not prove this successor launch recipe works. Storyboard generation remains usable without any launch.
@@ -49,7 +50,24 @@ Before any authorized listener, claim and immediately check its project-owned lo
 
 The device-free successor explicitly labels Mock as TYPED / MUTED. Its intended Start path does not call getUserMedia, enumerate devices or request microphone permission; the real AudioWorklet graph processes internal diagnostic PCM through muted output. Capture must use that exact reviewed build and keep those media APIs forbidden. The older build requested media during Start and is not a substitute, even with fake-device flags. Never select Live or activate the retained real-media path. Muted PCM has no speaker identity and cannot stand in for licensed speech fixtures or heldout cells. A screen recording must disclose its silent output; do not dub speech or imply audible tone playback.
 
-If capture is supported after the gate passes, retain the original local recording and a separate receipt identifying exact source/build, recording mechanism, fake-media configuration, observed start/end/duration, interruptions/recovery outcomes, post-End API-handle observations and any incomplete step. Label it MOCK / TYPED / MUTED / DEVICE-FREE throughout. A failed or partial capture is an incomplete artifact, not a successful two-minute demo. Keep outputs under an explicitly owned local artifact directory; publication remains separate.
+If capture is supported after the gate passes, retain the original local recording and a separate receipt identifying exact source/build, recording mechanism, explicit device-free typed/muted configuration with getUserMedia/device enumeration forbidden and no microphone permission or audible output, observed start/end/duration, interruptions/recovery outcomes, post-End API-handle observations and any incomplete step. Label it MOCK / TYPED / MUTED / DEVICE-FREE throughout. A failed or partial capture is an incomplete artifact, not a successful two-minute demo. Keep outputs under an explicitly owned local artifact directory; publication remains separate.
+
+## Process metrics are intentionally unknown
+
+The no-probe default does not collect OS process metrics or launch a probe/helper.
+`rss_bytes`, `open_sockets` and `open_files` remain `value: null`,
+`observation: unknown`, with fixed reason `own_process_metrics_disabled` and their
+original bytes/count units. This is a contract shape, not an observed measurement.
+Show these unknowns honestly if a later authorized demo opens diagnostics; never
+turn them into zero, a green resource indicator or an invented growth plot.
+
+Required resource and soak reliability coverage therefore remains incomplete.
+Observed event-loop values or released browser API handles do not substitute for
+missing OS metrics. The helper feature is deferred, and Linux measurement is queued
+only under a future separate review/design/activation. No listener, browser,
+short/full soak, container or recording is authorized by this reconciliation.
+The storyboard still targets 120 seconds; actual duration and recording remain unset.
+See [no-probe diagnostics](OPERATIONS.md#no-probe-diagnostics-and-incomplete-resource-coverage).
 
 ## Operational evidence and open work
 

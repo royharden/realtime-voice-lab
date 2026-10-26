@@ -63,35 +63,48 @@ converter/assembly/report APIs may be checked with inline team-authored syntheti
 public-development fixtures and supported dependency injection. Do not invent a
 permissive verifier, diagnostic read-root bypass or heldout/live acceptance.
 
-## Later listener and browser activation
+## Supported same-origin launch interface (activation held)
 
-Claim and check a localhost port with the shared agent-ports registry before serving.
-The CLI accepts an explicit port in 20000–29999 and an existing port-claim receipt;
-Use only the project-owned reservation; the current local block is 127.0.0.1 ports 22300–22399.
-Use `voicelab serve --help` for exact arguments. The factory is
-`voicelab.server.app:create_app`; host binding is 127.0.0.1. Keep frontend and relay
-on separately claimed ports. Set `VOICELAB_ALLOWED_ORIGIN` to the frontend's exact
-loopback HTTP origin, including its claimed port. There is no implicit origin or
-port. Missing configuration and wildcard origins are refused before activation.
-An existing receipt file alone is not a fresh ownership check.
+This interface matches the pinned no-probe source candidate `3211e8a`. Describing
+it does not authorize a listener, browser, helper, short/full soak or recording.
+Actual launch/browser reconciliation on the new backend and an explicit scoped
+runtime grant remain required. Replace all placeholders before any later use.
+
+After that grant, claim and immediately check one project-owned loopback port.
+The CLI accepts the reserved 20000–29999 band; the current project reservation is
+127.0.0.1 ports 22300–22399. An existing receipt file is not a fresh ownership check.
+UI and relay use the same actual port and exact allowed origin; do not create a
+second receipt or reuse another owner's listener to simulate this topology.
 
 ```powershell
-& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode mock --port <claimed-relay-port> --port-claim <existing-receipt> --run-id <frozen-run-id> --run-manifest-hash <manifest-sha256> --artifact-root <absolute-owned-root> --allowed-origin http://127.0.0.1:<claimed-frontend-port>
+$project = '<reviewed-frozen-server-checkout>'
+$env:PYTHONPATH = "$project/src"
+$port = <own-claimed-port>
+& "$project/.venv/Scripts/python.exe" -m voicelab.cli serve --mode mock --host 127.0.0.1 --port $port --port-claim <real-receipt> --run-id <frozen-run-id> --run-manifest-hash <manifest-sha256> --artifact-root <fresh-owned-runtime> --allowed-origin "http://127.0.0.1:$port" --web-dist <exact-device-free-dist> --web-manifest <matching-build-record.json>
 ```
 
-After web-owner dependency/build setup, set `VOICELAB_WEB_PORT` and use
-`npm --prefix "$project/web" run dev` on the separately claimed frontend port.
-The baseline UI's saved-evidence inspector requires same-origin serving; a
-separate Vite origin can show an incomplete-serving refusal. The UI tests supply
-test-only same-origin composition. CLI help and this recipe do not prove that
-production same-origin hosting exists or that the joined UI has passed.
+`--web-dist` and `--web-manifest` must be supplied together. The manifest pins a
+closed SHA256 inventory of built assets; the server retains only the bounded
+allowlisted bytes after its protected relay routes. Missing, altered, unrelated,
+linked or unsafe build inputs are refused. The build record is integrity metadata,
+not rights authority, runtime approval or arbitrary file-read permission. Omitting
+both flags leaves the existing relay-only default. A separate Vite origin does not
+provide same-origin metadata/evidence inspection. Dependency/build setup must
+produce the exact reviewed device-free bundle, not an old `web/dist`.
 
-Set `VOICELAB_NONCE` to an operator-created random 16–128 character local launch nonce.
-Enter the same value in the UI. It is a local cross-origin request guard, not a provider
-key or account credential. Never put real provider credentials in this app. WebSocket
-URL `/ws?nonce=...` and hello both carry the nonce. Do not retain full access-log URLs
-or share URLs containing it. The relay uses generic boundary errors without echoing it.
-No endpoint serves the nonce. `/health` reports only diagnostic evidence labels.
+Use the pinned environment's Python and an explicit source `PYTHONPATH`, as above,
+so a shared interpreter cannot silently import another checkout. The module entry
+is `python -m voicelab.cli`; `python -m voicelab` has no module entrypoint. Help is
+interface documentation, not evidence that a listener or joined workflow ran.
+
+Supply `VOICELAB_NONCE` through the existing ephemeral caller-memory mechanism,
+using a 16–128 character URL-safe per-launch value. Enter it through the local UI
+control; never put an actual nonce in this recipe, command arguments, manifests,
+recordings or retained logs. It is a local request guard, not a provider key.
+No credential file or real provider credential is needed or authorized. WebSocket
+query and hello carry it internally; access logging stays disabled and errors
+must not echo it. No endpoint serves it. Host and exact Origin checks, strict
+bounded HTTP bodies, privacy projection and live/rights gates remain unchanged.
 
 ## Conditional future live source activation
 
@@ -176,14 +189,46 @@ Live reconnect additionally refuses `recovery_unknown` until provider history
 rebuild/acknowledged cutoff behavior is independently verified. The mock recovery
 mechanism below is not evidence that a live provider conversation can be restored.
 
-`GET /diagnostics` uses the same loopback Host/exact Origin boundary and the
-`X-Voicelab-Nonce` header. It returns only the current server process's RSS bytes,
-open socket/file counts, current-event-loop task count and a single 10 ms scheduled
-wake-delay sample. Each metric has `value`, `observation`, `unit` and an optional
-reason. Optional psutil absence/platform limits produce unknown rather than zero.
-No file paths, socket addresses, task names or other-process metrics are returned.
-The later soak driver samples every two seconds; this endpoint does not establish
-that the required soak or cleanup checks passed.
+## No-probe diagnostics and incomplete resource coverage
+
+Default OS process metrics are intentionally not collected. The sampler starts
+no OS probes, subprocess helpers, threads or asyncio tasks, and owns no collection
+cache or timing source. There is no runtime flag, JSON field or HTTP option that
+turns the deferred helper feature on. Its existing async `sample`/`aclose` caller
+shape is retained; a successful close is not evidence that OS metrics were measured.
+
+Protected GET and POST `/diagnostics` retain the loopback Host, exact Origin and
+`X-Voicelab-Nonce` boundary. POST requires the same bounded exact empty-object body
+policy as protected evidence reads. The following three rows are contract values,
+not observed zero usage or platform measurements:
+
+| Metric | JSON value | Observation | Unit | Reason |
+|---|---|---|---|---|
+| `rss_bytes` | `null` | `unknown` | `bytes` | `own_process_metrics_disabled` |
+| `open_sockets` | `null` | `unknown` | `count` | `own_process_metrics_disabled` |
+| `open_files` | `null` | `unknown` | `count` | `own_process_metrics_disabled` |
+
+The fixed reason survives the closed metadata projection. This is deliberate
+non-collection even when optional OS libraries are installed, not an instruction
+to install a package, retry a probe or substitute zero. No file paths, socket
+addresses, task names or other-process metrics are returned.
+
+Current-event-loop task count and a single 10 ms scheduled-yield wake-delay
+observation remain separate diagnostics. They do not supply RSS, socket or file
+measurements, prove timing neutrality, or form a reliable resource series. Browser
+API-handle and worklet observations likewise remain distinct from OS/device cleanup.
+
+Required resource/soak coverage is incomplete with these unknown rows. Even a
+completed workload, responsive diagnostics endpoint, valid startup summary or
+released browser handles cannot produce a required resource-reliability pass.
+Keep workload counts, sampled coverage, unknown reasons and cleanup evidence
+separate; do not waive required metrics or present missing rows as zero growth.
+
+The prior OS-helper feature remains deferred, with its failed historical evidence
+preserved. This default does not claim to repair or measure that feature. Linux
+measurement is queued only: a future adapter needs a separately reviewed design
+and explicit activation grant. Do not start a container, listener or OS probe to
+fill the unknowns under the current documentation/source-only grant.
 
 ## Lifecycle and metadata protocol
 
@@ -458,8 +503,10 @@ substitute a fake rights/read capability to open guarded fixtures. The root serv
 CLI is relay-only by default. The declared same-origin successor pairs
 `--web-dist` and `--web-manifest` on one actual claimed port; its corrected module
 entrypoint is `python -m voicelab.cli`. A prospective command is in [demo](DEMO.md).
-It remains pending actual reviewed launch evidence; a separate Vite origin and the
-older test-only static mount are not evidence for that successor recipe.
+It remains pending actual new-backend launch/browser evidence and an explicit
+scoped runtime grant; a separate Vite origin and the older test-only static mount
+are not evidence for that successor recipe. Default OS process metrics remain
+intentionally uncollected and resource/soak coverage incomplete, as described above.
 Use only an owner-claimed/checked loopback listener and the exact reviewed
 device-free TYPED / MUTED successor. Its mock Start must request no media permission
 or physical device; keep media APIs forbidden and the real-media/live path inactive.
