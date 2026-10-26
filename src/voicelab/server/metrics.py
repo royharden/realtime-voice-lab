@@ -106,7 +106,8 @@ class OwnProcessSampler:
 
     A launch that exceeds its deadline remains owned until its completion callback
     kills/reaps it. Unconfirmed cleanup closes the gate to further launches rather
-    than accumulating workers. aclose owns cancellation and shutdown cleanup.
+    than accumulating workers. Concurrent aclose callers join one bounded
+    shutdown owner before their own cancellation can leave the server lifetime.
     """
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic,
@@ -116,6 +117,7 @@ class OwnProcessSampler:
         self._task: asyncio.Task | None = None
         self._launch_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._close_task: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._cache: tuple[dict[str, dict[str, object]], dict[str, int]] | None = None
         self._cached_at = 0.0
@@ -269,21 +271,47 @@ class OwnProcessSampler:
         """Bound cleanup; report unconfirmed ownership rather than hiding it.
 
         A late launch remains retained and its callback still stops/reaps it.
-        The caller must treat a shutdown exception as incomplete cleanup, never
-        as a successful resource/soak observation.
+        Caller cancellation is deferred until the shared shutdown owner finishes;
+        shielding alone would leave that owner pending when a lifespan exits.
+        A failed owner remains visible as the cancellation's cause as well as
+        on _close_task. Neither result certifies successful resource coverage.
         """
         self._closed = True
         self._launch_expired = True
+        if self._close_task is None or self._close_task.done():
+            self._close_task = asyncio.create_task(self._close())
+        owner = self._close_task
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                await asyncio.shield(owner)
+            except asyncio.CancelledError as error:
+                if owner.cancelled():
+                    raise
+                if cancellation is None:
+                    cancellation = error
+                # Repeated cancellation still joins this same bounded owner.
+                continue
+            except Exception as error:
+                if cancellation is not None:
+                    raise cancellation from error
+                raise
+            if cancellation is not None:
+                raise cancellation
+            return
+
+    async def _close(self) -> None:
+        """Single shutdown owner; callers cannot cancel its cleanup awaits."""
         if self._task is not None and not self._task.done():
             self._task.cancel()
             with suppress(asyncio.CancelledError, Exception):
-                await self._task
+                await asyncio.shield(self._task)
         if self._launch_task is not None and not self._launch_task.done():
             with suppress(TimeoutError, Exception):
                 async with asyncio.timeout(PROBE_TIMEOUT):
                     await asyncio.shield(self._launch_task)
         if self._cleanup_task is not None and not self._cleanup_task.done():
-            await self._cleanup_task
+            await asyncio.shield(self._cleanup_task)
         if self._process is not None:
             await self._reap()
         self._cache = None
