@@ -55,6 +55,24 @@ def junit_counts(report: Path) -> dict[str, int]:
         raise ValueError('testcases outside declared suites')
     if root.tag == 'testsuites':
         check_counts(root, totals, required=False)
+    # pytest emits flat suites and cases; metadata/output may not hide outcomes.
+    # Keep this hierarchy bounded to that report format, including text-only leaves.
+    children = {
+        'testsuites': ('testsuite',),
+        'testsuite': ('properties', 'testcase'),
+        'testcase': ('properties', 'failure', 'error', 'skipped', 'system-out', 'system-err'),
+        'properties': ('property',),
+        'property': (),
+        'failure': (),
+        'error': (),
+        'skipped': (),
+        'system-out': (),
+        'system-err': (),
+    }
+    for parent in root.iter():
+        for child in parent:
+            if child.tag not in children[parent.tag]:
+                raise ValueError(f'unsupported JUnit structure: {child.tag!r} under {parent.tag!r}')
     return totals
 
 

@@ -12,6 +12,11 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'ci_validate.py'
 POSITIVE = ('<testsuites><testsuite tests="1" failures="0" errors="0" skipped="0">'
             '<testcase classname="control" name="executed"/></testsuite></testsuites>')
+FIXTURES = Path(__file__).with_name('fixtures')
+
+
+def case_report(content):
+    return POSITIVE.replace('name="executed"/>', f'name="executed">{content}</testcase>')
 
 
 @pytest.fixture
@@ -113,6 +118,118 @@ def test_positive_actual_testcases_pass(run_validation, xml, expected_tests):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('family', ['xunit1', 'xunit2'])
+@pytest.mark.parametrize('root_kind', ['testsuites', 'testsuite', 'multiple-suites'])
+def test_real_pytest_properties_and_captured_output_pass(run_validation, family, root_kind):
+    """what_bug_this_catches: structural guards rejecting genuine pytest metadata/output."""
+    xml = (FIXTURES / f'pytest-8.3.4-{family}-properties-output.xml').read_text(encoding='utf-8')
+    # These are captured pytest 8.3.4 reports; only host/path/timing were normalized.
+    assert '<properties>' in xml
+    assert '<system-out>' in xml and '<system-err>' in xml
+    assert '&lt;failure' in xml and '&lt;error' in xml and '&lt;skipped' in xml
+    suite = xml[xml.index('<testsuite '):xml.index('</testsuite>') + len('</testsuite>')]
+    if root_kind == 'testsuite':
+        xml = suite
+    elif root_kind == 'multiple-suites':
+        xml = f'<testsuites tests="2" failures="0" errors="0" skipped="0">{suite}{suite}</testsuites>'
+    exitcode, phases, _ = run_validation(xml)
+    assert exitcode == 0
+    assert phases[0]['status'] == 'passed'
+    assert phases[0]['counts'] == {'tests': 2 if root_kind == 'multiple-suites' else 1,
+                                   'failures': 0, 'errors': 0, 'skipped': 0}
+
+
+@pytest.mark.parametrize('tag', ['failure', 'error', 'skipped'])
+@pytest.mark.parametrize('location', ['testcase-wrapper', 'suite', 'root'])
+def test_nested_and_misplaced_outcomes_reject_rc0(run_validation, tag, location):
+    """what_bug_this_catches: RV1-RUNNER-001-R2 nested and suite-level false greens."""
+    if location == 'testcase-wrapper':
+        # Exact reviewer shape, with a tag for each nonpassing outcome.
+        xml = ('<testsuites><testsuite tests="1" failures="0" errors="0" skipped="0">'
+               f'<testcase><wrapper><{tag}/></wrapper></testcase></testsuite></testsuites>')
+    elif location == 'suite':
+        xml = POSITIVE.replace('</testsuite>', f'<{tag}/></testsuite>')
+    else:
+        xml = POSITIVE.replace('</testsuites>', f'<{tag}/></testsuites>')
+    exitcode, phases, _ = run_validation(xml)
+    assert exitcode == 1
+    assert phases[0]['status'] == 'incomplete'
+    assert phases[0]['returncode'] == 0
+    assert 'unsupported JUnit structure' in phases[0]['reason']
+
+
+@pytest.mark.parametrize('tag', ['failure', 'error', 'skipped'])
+@pytest.mark.parametrize('namespace', ['prefixed', 'default'])
+def test_namespaced_outcomes_reject_rc0(run_validation, tag, namespace):
+    """what_bug_this_catches: namespaced outcome elements silently escaping direct counts."""
+    outcome = (f'<other:{tag} xmlns:other="urn:unsupported"/>' if namespace == 'prefixed'
+               else f'<{tag} xmlns="urn:unsupported"/>')
+    exitcode, phases, _ = run_validation(case_report(outcome))
+    assert exitcode == 1
+    assert phases[0]['status'] == 'incomplete'
+    assert phases[0]['returncode'] == 0
+    assert 'unsupported JUnit structure' in phases[0]['reason']
+
+
+@pytest.mark.parametrize('tag', ['failure', 'error', 'skipped'])
+@pytest.mark.parametrize('container', ['properties', 'property', 'system-out', 'system-err',
+                                      'failure', 'error', 'skipped'])
+def test_metadata_and_text_leaves_cannot_hide_outcomes(run_validation, tag, container):
+    """what_bug_this_catches: recognized metadata/output/outcomes hiding nested XML outcomes."""
+    content = f'<{container}><{tag}/></{container}>'
+    if container == 'property':
+        content = f'<properties>{content}</properties>'
+    xml = case_report(content)
+    for outcome, key in [('failure', 'failures'), ('error', 'errors'), ('skipped', 'skipped')]:
+        if container == outcome:
+            xml = xml.replace(f'{key}="0"', f'{key}="1"')
+    exitcode, phases, _ = run_validation(xml)
+    assert exitcode == 1
+    assert phases[0]['status'] == 'incomplete'
+    assert 'unsupported JUnit structure' in phases[0]['reason']
+
+
+@pytest.mark.parametrize('xml', [
+    POSITIVE.replace('</testsuites>', '<wrapper><failure/></wrapper></testsuites>'),
+    POSITIVE.replace('</testsuite>', '<wrapper><error/></wrapper></testsuite>'),
+    POSITIVE.replace('</testsuite>', '<properties><failure/></properties></testsuite>'),
+    POSITIVE.replace('</testsuite>', '<properties><property><skipped/></property></properties>'
+                     '</testsuite>'),
+    case_report('<wrapper/>'),
+    case_report('<properties><wrapper/></properties>'),
+    case_report('<system-out><wrapper/></system-out>'),
+    case_report('<system-err><wrapper/></system-err>'),
+    case_report('<properties><property><wrapper/></property></properties>'),
+    case_report('<property name="misplaced" value="x"/>'),
+    POSITIVE.replace('</testsuites>', '<system-out>misplaced output</system-out></testsuites>'),
+    POSITIVE.replace('</testsuite>', '<system-err>misplaced output</system-err></testsuite>'),
+    POSITIVE.replace('<testsuites>', '<testsuites xmlns="urn:unsupported">'),
+    POSITIVE.replace('<testsuite ', '<testsuite xmlns="urn:unsupported" '),
+    POSITIVE.replace('<testcase ', '<testcase xmlns="urn:unsupported" '),
+    case_report('<properties xmlns="urn:unsupported"/>'),
+    case_report('<properties><property xmlns="urn:unsupported"/></properties>'),
+    case_report('<system-out xmlns="urn:unsupported">output</system-out>'),
+])
+def test_unsupported_wrappers_placements_and_namespaces_cannot_pass(run_validation, xml):
+    """what_bug_this_catches: accepting unsupported XML because ordinary case counts match."""
+    exitcode, phases, _ = run_validation(xml)
+    assert exitcode == 1
+    assert phases[0]['status'] == 'incomplete'
+    assert phases[0]['returncode'] == 0
+    assert phases[0]['reason'].startswith('invalid JUnit report:')
+
+
+@pytest.mark.parametrize('tag', ['failure', 'error', 'skipped'])
+def test_malformed_second_suite_cannot_pass(run_validation, tag):
+    """what_bug_this_catches: inspecting only the first suite's outcome structure."""
+    malformed = case_report(f'<wrapper><{tag}/></wrapper>')
+    xml = POSITIVE.replace('</testsuites>', malformed.removeprefix('<testsuites>'))
+    exitcode, phases, _ = run_validation(xml)
+    assert exitcode == 1
+    assert phases[0]['status'] == 'incomplete'
+    assert 'unsupported JUnit structure' in phases[0]['reason']
+
+
 @pytest.mark.parametrize('xml,reason', [
     (None, 'invalid JUnit report'),
     ('', 'invalid JUnit report'),
@@ -168,7 +285,10 @@ def test_actual_nonpassing_outcomes_cannot_pass(run_validation, tag, key, status
     assert phases[0]['reason']
 
 
-@pytest.mark.parametrize('xml', [POSITIVE, None, '<malformed'])
+@pytest.mark.parametrize('xml', [POSITIVE, None, '<malformed',
+                               case_report('<wrapper><failure/></wrapper>'),
+                               POSITIVE.replace('</testsuite>', '<failure/></testsuite>'),
+                               case_report('<failure xmlns="urn:unsupported"/>')])
 def test_subprocess_failure_remains_failed_with_any_report(run_validation, xml):
     """what_bug_this_catches: a valid report or invalid evidence erasing subprocess failure."""
     exitcode, phases, _ = run_validation(xml, 5)
@@ -193,9 +313,11 @@ def test_listener_preflight_still_blocks_without_spawning(run_validation):
     assert not calls
 
 
-def test_invalid_report_records_each_phase_and_returns_nonzero(run_validation):
+@pytest.mark.parametrize('xml', ['<malformed', case_report('<wrapper><failure/></wrapper>'),
+                               case_report('<skipped xmlns="urn:unsupported"/>')])
+def test_invalid_report_records_each_phase_and_returns_nonzero(run_validation, xml):
     """what_bug_this_catches: invalid XML aborting before later phase receipts are retained."""
-    exitcode, phases, calls = run_validation('<malformed', phase='all', preflight=True)
+    exitcode, phases, calls = run_validation(xml, phase='all', preflight=True)
     assert exitcode == 1
     assert [item['phase'] for item in phases] == ['unit', 'cli', 'browser']
     assert all(item['status'] == 'incomplete' for item in phases)
