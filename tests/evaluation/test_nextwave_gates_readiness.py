@@ -196,3 +196,22 @@ def test_finite_exponent_parser_positive_control(checker, public_inputs, monkeyp
     report = checker.inventory(public_root=root, manifest='run.json', manifest_sha256='0' * 64)
     assert report['manifest']['pins']['audio']['synthetic_probe'] == 1000
     assert report['product_acceptance'] is False
+
+
+@pytest.mark.parametrize('defect', ['duplicate_schedule', 'blank_unknown_reason'])
+def test_independent_review_denominator_and_unknown_reason_regressions(checker, public_inputs, monkeypatch, defect):
+    """what_bug_this_catches: duplicate denominators collapsing or blank reasons looking concrete.
+
+    Reproduces the independent review findings with a parser-only reader double.
+    """
+    root, manifest, records = public_inputs
+    if defect == 'duplicate_schedule':
+        manifest['scheduled_tasks'] = ['trial-1', 'trial-1']
+    else:
+        records[0].update(observation='unknown', unknown_reason='   ')
+    payloads = {'manifest': json.dumps(manifest).encode(), 'evidence': json.dumps(records).encode()}
+    monkeypatch.setattr(checker.ArtifactReader, 'read',
+                        lambda self, name, kind, **kwargs: payloads[kind])
+    with pytest.raises(ValueError):
+        checker.inventory(public_root=root, manifest='run.json', manifest_sha256='0' * 64,
+                          evidence='records.json', evidence_sha256='1' * 64)
