@@ -2,9 +2,26 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 
 from .browser import own_diagnostic
+
+
+def _nonnegative_number(value) -> bool:
+    """Malformed instrumentation is unknown, including bool and NaN/Infinity."""
+    return (type(value) is int and value >= 0
+            or type(value) is float and math.isfinite(value) and value >= 0)
+
+
+def _queue_duration(frames, rate) -> float | None:
+    if not _nonnegative_number(frames) or not _nonnegative_number(rate) or rate == 0:
+        return None
+    try:
+        seconds = frames / rate
+    except OverflowError:
+        return None
+    return seconds if _nonnegative_number(seconds) else None
 
 
 async def app_snapshot(page) -> dict:
@@ -47,11 +64,12 @@ class DiagnosticCursor:
                     if key in detail:
                         rate = detail.get('context_sample_rate', self.sample_rate)
                         value = detail[key]
-                        if not isinstance(rate, (int, float)) or rate <= 0 or not isinstance(value, (int, float)) or value < 0:
+                        seconds = _queue_duration(value, rate)
+                        if seconds is None:
                             self.queue_unknown = True
                         else:
                             self.queue_events += 1
-                            self.max_queue_seconds = max(self.max_queue_seconds, value / rate)
+                            self.max_queue_seconds = max(self.max_queue_seconds, seconds)
             before, self.cursor = self.cursor, batch['cursor']
             if self.cursor >= batch['latest_seq']:
                 return events
@@ -83,7 +101,11 @@ async def resource_sample(pages, cdps, spec: dict, nonce: str, *, after_warmup: 
                           sample_rates: list[int | None] | None = None) -> dict:
     started = time.monotonic()
     heaps, snapshots, unknown = {}, [], []
-    for index, (page, cdp) in enumerate(zip(pages, cdps)):
+    aligned = len(pages) == len(cdps)
+    if not aligned:
+        unknown.append('context_metric_alignment_unknown')
+    for index, page in enumerate(pages):
+        cdp = cdps[index] if index < len(cdps) else None
         snapshot = {}
         try:
             snapshot = await app_snapshot(page)
@@ -95,7 +117,10 @@ async def resource_sample(pages, cdps, spec: dict, nonce: str, *, after_warmup: 
             await page.evaluate('()=>window.__voiceLabDriver.snapshot()')
             metrics = await cdp.send('Performance.getMetrics')
             values = {item['name']: item['value'] for item in metrics['metrics']}
-            heaps[f'c{index}'] = values.get('JSHeapUsedSize')
+            value = values.get('JSHeapUsedSize')
+            heaps[f'c{index}'] = value if _nonnegative_number(value) else None
+            if heaps[f'c{index}'] is None:
+                unknown.append('browser_heap_metric_unknown')
         except Exception as exc:
             heaps[f'c{index}'] = None
             unknown.append(type(exc).__name__)
@@ -108,7 +133,10 @@ async def resource_sample(pages, cdps, spec: dict, nonce: str, *, after_warmup: 
         unknown.append(type(exc).__name__)
     def observed(name):
         row = server.get('metrics', {}).get(name, {})
-        return row.get('value') if row.get('observation') == 'observed' else None
+        value = row.get('value')
+        if row.get('observation') == 'observed' and _nonnegative_number(value):
+            return value
+        return None
     handles = [cleanup_count(snapshot) for snapshot in snapshots]
     queues, worklet_queues = [], []
     for index, snapshot in enumerate(snapshots):
@@ -116,7 +144,7 @@ async def resource_sample(pages, cdps, spec: dict, nonce: str, *, after_warmup: 
         states = snapshot.get('observation_statuses', {})
         if (states.get('playback_queue') not in {'estimated', 'observed_empty'}
                 or states.get('upload_queue') not in {'estimated', 'observed_empty'}
-                or any(q.get(key) is None for key in ('playback', 'upload'))):
+                or any(not _nonnegative_number(q.get(key)) for key in ('playback', 'upload'))):
             queues.append(None)
         else:
             queues.append(max(q['playback'], q['upload']))
@@ -124,14 +152,13 @@ async def resource_sample(pages, cdps, spec: dict, nonce: str, *, after_warmup: 
         worklet = snapshot.get('worklet', {})
         if cleanup_count(snapshot) == 0 and states.get('cleanup') == 'observed_released':
             worklet_queues.append(0)
-        elif (worklet.get('status') == 'observed' and isinstance(worklet.get('queued_frames'), (int, float))
-                and rate is not None and rate > 0):
-            worklet_queues.append(worklet['queued_frames'] / rate)
+        elif worklet.get('status') == 'observed':
+            worklet_queues.append(_queue_duration(worklet.get('queued_frames'), rate))
         else:
             worklet_queues.append(None)
     return {'monotonic_seconds': started, 'collection_duration_seconds': time.monotonic() - started,
         'after_warmup': after_warmup, 'browser_heaps_by_context': heaps,
-        'browser_heap_bytes': max(heaps.values()) if heaps and all(v is not None for v in heaps.values()) else None,
+        'browser_heap_bytes': max(heaps.values()) if aligned and heaps and all(v is not None for v in heaps.values()) else None,
         'owned_handles': sum(handles) if handles and all(v is not None for v in handles) else None,
         'queue_seconds': max(queues) if queues and all(v is not None for v in queues) else None,
         'worklet_queue_seconds': max(worklet_queues) if worklet_queues and all(v is not None for v in worklet_queues) else None,

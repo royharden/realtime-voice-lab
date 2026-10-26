@@ -238,7 +238,7 @@ def test_local_producer_persists_exact_hash_lineage_and_cleanup_status(boundarie
         port_claim=inputs['receipt'], web_dist=inputs['build'],
         web_manifest=inputs['build_record'], profile='short')
     module.run_local_synthetic(args)
-    assert {'/health', '/admission'} <= set(diagnostic_paths)
+    assert diagnostic_paths == ['/health', '/admission']
     provenance = json.loads((args.out / 'local-synthetic-provenance.json').read_bytes())
     public_raw = (args.out / 'local-synthetic-manifest.json').read_bytes()
     public = json.loads(public_raw)
@@ -257,3 +257,145 @@ def test_local_producer_persists_exact_hash_lineage_and_cleanup_status(boundarie
     for row in provenance['artifacts']:
         assert row['product_acceptance'] is False and row['evidence_label'] == module.LABEL
         assert hashlib.sha256((args.out / row['path']).read_bytes()).hexdigest() == row['sha256']
+
+
+@pytest.mark.parametrize('admission_defect', ['absent', 'wrong-run'])
+def test_local_producer_refuses_invalid_admission_before_workload(
+        boundaries, inputs, monkeypatch, admission_defect):
+    """what_bug_this_catches: healthy relay bypassing missing or foreign-run admission.
+
+    All process/diagnostic/workload boundaries are doubles. A local fake clock
+    expires the readiness deadline immediately; no real sleep or network occurs.
+    """
+    from voicelab.harness import browser, soak
+    module, _ = boundaries
+    stop = SimpleNamespace(stopped=False)
+    stop.set = lambda: setattr(stop, 'stopped', True)
+
+    class Process:
+        pid = None
+        exitcode = None
+        terminated = False
+
+        def start(self):
+            self.pid = 999999  # synthetic identifier, never an OS process target
+
+        def join(self, timeout):
+            if stop.stopped:
+                self.exitcode = 0
+
+        def is_alive(self):
+            return self.pid is not None and self.exitcode is None
+
+        def terminate(self):
+            self.terminated = True
+
+    process = Process()
+    context = SimpleNamespace(Event=lambda: stop, Process=lambda **kwargs: process)
+    monkeypatch.setattr(module.multiprocessing, 'get_context', lambda kind: context)
+    ticks = iter((0, 16))
+    monkeypatch.setattr(module, 'time', SimpleNamespace(
+        monotonic=lambda: next(ticks), sleep=lambda seconds: pytest.fail('unexpected sleep')))
+    diagnostic_paths, observed_specs, workload_calls = [], [], []
+
+    def diagnostic(spec, nonce, path):
+        diagnostic_paths.append(path)
+        observed_specs.append(spec)
+        if path == '/health':
+            return {'mode': 'mock', 'protocol_version': 1}
+        if path == '/admission':
+            if admission_defect == 'absent':
+                return {}
+            return {'arms': {arm: {'run_id': spec['run_id'] + '-foreign'}
+                             for arm in ('V', 'C')}}
+        pytest.fail('unexpected diagnostic request: ' + path)
+
+    async def workload(*args, **kwargs):
+        workload_calls.append(True)
+        pytest.fail('workload must not start without current-run admission')
+
+    monkeypatch.setattr(browser, 'own_diagnostic', diagnostic)
+    monkeypatch.setattr(soak, 'run_soak', workload)
+    args = SimpleNamespace(out=inputs['root'] / 'fresh-run', port=22341,
+        port_claim=inputs['receipt'], web_dist=inputs['build'],
+        web_manifest=inputs['build_record'], profile='short')
+    with pytest.raises(TimeoutError, match='^local_synthetic_relay_start_timeout$'):
+        module.run_local_synthetic(args)
+    assert diagnostic_paths == ['/health', '/admission'] and not workload_calls
+    assert stop.stopped and process.exitcode == 0 and not process.terminated
+    spec = observed_specs[0]
+    with pytest.raises(ValueError, match='local_synthetic_capability_inactive'):
+        spec['_local_synthetic'].validate(spec)
+    handoff = json.loads((args.out / 'observations' / 'handoff.json').read_bytes())
+    assert handoff['driver_completed'] is False
+    assert handoff['product_acceptance'] is False and handoff['heldout_release'] is False
+    # Failed startup may retain diagnostic metadata, never admitted workload/results.
+    # The exact closed shape rejects completed/observed/pass claims at any new key.
+    summary_raw = (args.out / 'observations' / 'local-summary.json').read_bytes()
+    summary = json.loads(summary_raw)
+    assert summary == {
+        'incomplete': ['local_synthetic_incomplete'],
+        'summary': {'full_gate_pass': False, 'product_acceptance': False},
+        'evidence_label': module.LABEL, 'product_acceptance': False,
+    }, 'startup summary must remain incomplete with zero workload and no success metadata'
+    public_raw = (args.out / 'local-synthetic-manifest.json').read_bytes()
+    public = json.loads(public_raw)
+    assert handoff['run_id'] == public['run_id'] == spec['run_id']
+    assert handoff['manifest_hash'] == spec['_manifest_hash'] == hashlib.sha256(public_raw).hexdigest()
+    assert public['mode'] == spec['mode'] == 'mock' and public['split'] == spec['split'] == 'dev'
+    assert public['product_acceptance'] is False and public['external_rights_authority'] is False
+    assert public['web_sha256'] == spec['_web_sha256'] == inputs['manifest']['sha256']
+    for relative, expected in public['generated'].items():
+        assert hashlib.sha256((args.out / relative).read_bytes()).hexdigest() == expected
+    driver_raw = (args.out / 'observations' / 'driver.jsonl').read_bytes()
+    events = [json.loads(raw) for raw in driver_raw.splitlines()]
+    assert len(events) == 1  # No local_synthetic_started/admission/workload event.
+    terminal = events[0]
+    assert terminal['kind'] == 'driver_ended' and terminal['completed'] is False
+    assert terminal['reason'] == 'bounded_driver_step_failed'
+    assert terminal['run_id'] == spec['run_id']
+    assert handoff['counts'] == {'driver_ended': 1}
+    assert handoff['references'] == {
+        'driver': {'path': 'driver.jsonl', 'kind': 'driver_observations',
+                   'sha256': hashlib.sha256(driver_raw).hexdigest()},
+        'local-summary': {'path': 'local-summary.json', 'kind': 'driver_summary',
+                          'sha256': hashlib.sha256(summary_raw).hexdigest()},
+    }
+    provenance = json.loads((args.out / 'local-synthetic-provenance.json').read_bytes())
+    assert provenance['relay_exit_code'] == 0 and provenance['forced_stop'] is False
+    assert provenance['product_acceptance'] is False and provenance['external_rights_authority'] is False
+    artifacts = {row['path']: row for row in provenance['artifacts']}
+    assert {'local-synthetic-manifest.json', 'observations/driver.jsonl',
+            'observations/handoff.json', 'observations/local-summary.json'} <= artifacts.keys()
+    for relative, row in artifacts.items():
+        assert row['evidence_label'] == module.LABEL and row['product_acceptance'] is False
+        assert hashlib.sha256((args.out / relative).read_bytes()).hexdigest() == row['sha256']
+
+
+@pytest.mark.parametrize('false_claim', ['completed', 'observed_turns', 'full_gate_pass'])
+def test_failed_startup_summary_predicate_rejects_false_success_metadata(
+        boundaries, inputs, monkeypatch, false_claim):
+    """what_bug_this_catches: permissive summary existence checks accepting invented success.
+
+    Corrupt only the actual persisted summary at the artifact boundary, then run
+    the full failed-admission control. No workload, process or network is started.
+    """
+    from voicelab.harness.evidence import EvidenceSink
+    original = EvidenceSink.artifact
+    injected = []
+
+    def artifact(sink, name, value, kind):
+        if name == 'local-summary.json':
+            value = deepcopy(value)
+            if false_claim == 'full_gate_pass':
+                value['summary']['full_gate_pass'] = True
+            else:
+                value[false_claim] = True if false_claim == 'completed' else 1
+            injected.append(false_claim)
+        return original(sink, name, value, kind)
+
+    monkeypatch.setattr(EvidenceSink, 'artifact', artifact)
+    with pytest.raises(AssertionError, match='startup summary must remain incomplete'):
+        test_local_producer_refuses_invalid_admission_before_workload(
+            boundaries, inputs, monkeypatch, 'absent')
+    assert injected == [false_claim]
