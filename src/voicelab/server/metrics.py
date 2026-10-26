@@ -19,13 +19,18 @@ def _worker(pid: int) -> None:
         import psutil
         process = psutil.Process(pid)
         readers = {"rss_bytes": lambda: process.memory_info().rss,
-                   "open_sockets": lambda: len(process.net_connections(kind="inet")),
-                   "open_files": lambda: len(process.open_files())}
+                   "open_sockets": lambda: len(process.net_connections(kind="inet"))}
+        # Observed Windows open_files calls can survive termination while stuck
+        # in the OS. Do not start that known unsafe reader, even in a helper.
+        if sys.platform != "win32":
+            readers["open_files"] = lambda: len(process.open_files())
     except Exception:
         readers = {}
     for name in UNITS:
         value = stamp = None
-        reason = "own_process_probe_unsupported"
+        reason = ("own_process_probe_unsupported_windows_open_files"
+                  if name == "open_files" and sys.platform == "win32"
+                  else "own_process_probe_unsupported")
         if name in readers:
             try:
                 value = readers[name]()
@@ -161,7 +166,8 @@ class OwnProcessSampler:
         if not isinstance(name, str) or name not in UNITS or name in seen:
             raise ValueError("probe_record_invalid")
         value, stamp, reason = record["value"], record["observed_ns"], record["reason"]
-        if reason in {"own_process_probe_unsupported", "own_process_probe_failed"}:
+        if reason in {"own_process_probe_unsupported", "own_process_probe_failed",
+                      "own_process_probe_unsupported_windows_open_files"}:
             if value is not None or stamp is not None:
                 raise ValueError("probe_record_invalid")
             return name, _unknown(reason)[name]
