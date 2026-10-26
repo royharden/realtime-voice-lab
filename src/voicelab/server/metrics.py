@@ -20,8 +20,8 @@ def _worker(pid: int) -> None:
         process = psutil.Process(pid)
         readers = {"rss_bytes": lambda: process.memory_info().rss,
                    "open_sockets": lambda: len(process.net_connections(kind="inet"))}
-        # Observed Windows open_files calls can survive termination while stuck
-        # in the OS. Do not start that known unsafe reader, even in a helper.
+        # Observed Windows open_files calls exceed the sampling deadline;
+        # unsupported until safe bounded execution is established.
         if sys.platform != "win32":
             readers["open_files"] = lambda: len(process.open_files())
     except Exception:
