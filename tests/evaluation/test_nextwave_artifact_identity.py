@@ -172,6 +172,7 @@ def test_actual_in_place_mutation_with_restored_size_mtime_refuses(tmp_path, mon
     class Stream:
         def __init__(self, *args, **kwargs):
             self.stream = original(*args, **kwargs)
+            self.read_completed = False
 
         def __enter__(self):
             self.stream.__enter__()
@@ -179,7 +180,7 @@ def test_actual_in_place_mutation_with_restored_size_mtime_refuses(tmp_path, mon
 
         def __exit__(self, *args):
             result = self.stream.__exit__(*args)
-            if phase == 'after_descriptor_close':
+            if phase == 'after_descriptor_close' and self.read_completed:
                 mutate()
             return result
 
@@ -188,6 +189,7 @@ def test_actual_in_place_mutation_with_restored_size_mtime_refuses(tmp_path, mon
 
         def read(self, size):
             raw = self.stream.read(size)
+            self.read_completed = True
             if phase == 'during_read':
                 mutate()
             return raw
