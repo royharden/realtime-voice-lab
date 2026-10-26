@@ -114,13 +114,37 @@ def test_cli_web_pair_mounts_exact_build_without_starting_real_listener(build, t
 
 
 @pytest.mark.parametrize('flag', ['--web-dist', '--web-manifest'])
-def test_cli_partial_web_selection_refuses_without_listener(tmp_path, monkeypatch, flag):
+def test_cli_partial_web_selection_refuses_without_listener(build, tmp_path, monkeypatch, capsys, flag):
     """what_bug_this_catches: partial UI selection silently falls back to relay-only."""
     import uvicorn
     calls = []
     monkeypatch.setattr(uvicorn, 'run', lambda *args, **kwargs: calls.append(True))
+    monkeypatch.setenv('VOICELAB_NONCE', 'synthetic-nonce-0123456789')
+    root, manifest, _ = build
+    manifest_path = tmp_path / 'build-record.json'
+    manifest_path.write_text(json.dumps(manifest))
     checkpoint = tmp_path / 'synthetic-checkpoint.json'
     checkpoint.write_text('{}')
-    with pytest.raises((SystemExit, ValueError)):
-        cli.main(['serve', '--port', '22342', '--port-claim', str(checkpoint), flag, str(tmp_path)])
+    args = ['serve', '--port', '22342', '--port-claim', str(checkpoint),
+            '--allowed-origin', 'http://127.0.0.1:22342',
+            '--artifact-root', str(tmp_path / 'runtime'),
+            flag, str(root if flag == '--web-dist' else manifest_path)]
+
+    def assert_pair_refused(invoke):
+        with pytest.raises(SystemExit) as refused:
+            invoke(args)
+        assert refused.value.code == 2
+        assert '--web-dist and --web-manifest must be supplied together' in capsys.readouterr().err
+        assert calls == []
+
+    assert_pair_refused(cli.main)
     assert calls == []
+
+    # Countercontrol: ignore the partial selection and reach otherwise valid relay-only
+    # startup. The same oracle must fail; uvicorn remains intercepted throughout.
+    def ignoring_partial(argv):
+        return cli.main(argv[:-2])
+
+    with pytest.raises(pytest.fail.Exception, match='DID NOT RAISE'):
+        assert_pair_refused(ignoring_partial)
+    assert calls == [True]

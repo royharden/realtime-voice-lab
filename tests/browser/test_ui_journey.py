@@ -31,7 +31,8 @@ CHROMIUM_ARGS = ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-fo
 
 
 @asynccontextmanager
-async def ui(server: dict, arm: str = 'V', *, device_free: bool = False):
+async def ui(server: dict, arm: str = 'V', *, device_free: bool = False,
+             observer_script: str = ''):
     """Open the real UI, enter relay URL + nonce, pick mock/arm, start, await listening."""
     blocked, console, requests, pageerrors = [], [], [], []
     allowed = {server['page_origin'], server['relay_origin']}
@@ -62,9 +63,9 @@ async def ui(server: dict, arm: str = 'V', *, device_free: bool = False):
                   }
                 })();'''
                 # One script gives a defined guard-before-probe ordering.
-                await context.add_init_script(script=guard + PROBE.read_text(encoding='utf-8'))
+                await context.add_init_script(script=guard + PROBE.read_text(encoding='utf-8') + observer_script)
             else:
-                await context.add_init_script(path=str(PROBE))
+                await context.add_init_script(script=PROBE.read_text(encoding='utf-8') + observer_script)
             page = await context.new_page()
             page.on('console', lambda message: console.append(message.text))
             page.on('pageerror', lambda error: pageerrors.append(str(error)))
