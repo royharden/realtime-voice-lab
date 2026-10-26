@@ -44,6 +44,13 @@ def main(argv: Sequence[str] | None = None, *, authority=None, calibration_provi
          excluded_actor_refs: frozenset[str] = frozenset()) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='operation', required=True)
+    local = commands.add_parser('local-synthetic-soak', help='Generated non-speech/fake-media scope only; no external rights authority')
+    local.add_argument('--profile', choices=['short', 'full'], default='short')
+    local.add_argument('--port', type=int, required=True)
+    local.add_argument('--port-claim', type=Path, required=True)
+    local.add_argument('--web-dist', type=Path, required=True)
+    local.add_argument('--web-manifest', type=Path, required=True)
+    local.add_argument('--out', type=Path, required=True)
     for operation in ('journey', 'calibrate', 'soak', 'cohort'):
         command = commands.add_parser(operation)
         command.add_argument('--manifest', type=Path, required=True)
@@ -71,6 +78,13 @@ def main(argv: Sequence[str] | None = None, *, authority=None, calibration_provi
     catalog.add_argument('--catalog', type=Path, required=True)
     catalog.add_argument('--out', type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.operation == 'local-synthetic-soak':
+        from .local_synthetic import run_local_synthetic
+        result = run_local_synthetic(args)
+        print(json.dumps({'summary': result.get('summary'), 'incomplete': result.get('incomplete'),
+                          'evidence_label': result['evidence_label'], 'product_acceptance': False}, allow_nan=False))
+        return 0 if (not result.get('incomplete') and result.get('summary', {}).get('coverage_complete') is True
+                     and (args.profile != 'full' or result['summary'].get('full_gate_pass') is True)) else 1
     if args.operation == 'demo':
         value = {'evidence': 'planned walkthrough; no recording/rehearsal/measured duration', 'steps': DEMO_STEPS}
         print(json.dumps(value, indent=2) if args.json else '\n'.join(DEMO_STEPS))
@@ -148,4 +162,4 @@ def main(argv: Sequence[str] | None = None, *, authority=None, calibration_provi
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

@@ -47,7 +47,7 @@ currency component reservation settled price_version usage provider_requests amo
 admission_halted basis total_cost input_units output_units terminal_observation
 resume_required audio_replayed fence_epoch rendered_through_sample rendered_ack
 responseDone cancelTriggered fenceCounter lastFence connection injected
-liveTracks openSockets live_tracks open_sockets owned_handles media_tracks
+liveTracks openSockets live_tracks open_sockets open_files owned_handles media_tracks
 audio_context worklet source_nodes socket timer_references timers pending_closures
 pending_permission acquisitions cleanup_pending contexts_closed cleanup_complete
 state_observed cleanup_observed observation_statuses owned_handles_status
@@ -145,6 +145,7 @@ CONTROL_VALUES = {
     'reason': frozenset('ended_by_user silence_timeout permission_denied device_lost device_muted unsupported_audio abandoned service_restart transport_loss recovery_unknown protocol_error provider_error provider_timeout queue_overrun budget_halt success expected_interruption task_failure calibration_invalid driver_schedule_completed incomplete_observation_coverage driver_abandoned no_observed_admission task_stopped_before_turn earlier_task_termination bounded_driver_step_failed missing_terminal_hash_or_owned_trace explicit_owned_relay_artifact_root_absent previous_process_ended_without_terminal admission refused'.split()) | {'admission refused'},
 }
 CONTROL_VALUES['reason'] |= {
+    'own_process_metrics_disabled',
     'keyless mock — diagnostic synthetic tone; no spoken-task acceptance',
     'adapter epoch fence', 'adapter sequence gap; skipped/cancelled events possible',
     'inactive transport turn', 'inactive response',

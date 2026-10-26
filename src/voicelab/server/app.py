@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from decimal import Decimal
 import hmac
 import hashlib
+import mimetypes
 import os
 from pathlib import Path
+import re
 import secrets
 import time
 from typing import Any
@@ -35,9 +37,75 @@ from voicelab.core.task import TaskAuthority, TaskEvidenceUnavailable
 from voicelab.core.trace import TraceWriter, store_pcm
 from voicelab.core.snapshots import read_snapshot, save_snapshot
 from voicelab.security import SecurityRefused, safe_artifact_path, validate_boundary, validate_host, validate_nonce, validate_origin
+from voicelab.server.metrics import OwnProcessSampler
 
 EVIDENCE_LABEL = "keyless mock — diagnostic synthetic tone; no spoken-task acceptance"
 LIVE_EVIDENCE_LABEL = "authorized live source — runtime unverified; independent acceptance pending"
+
+
+def mount_built_web(app: FastAPI, directory: Path, manifest: dict, *, artifact_root: Path) -> dict[str, str]:
+    """Mount a closed, hash-pinned build snapshot after the protected relay routes.
+
+    Only allowlisted built bytes are retained. Static requests never reread paths,
+    so subsequent file replacement cannot expose unrelated local material.
+    """
+    from starlette.staticfiles import StaticFiles
+    root = Path(directory).absolute()
+    for path in (root, *root.parents):
+        if path.is_symlink() or path.is_junction():
+            raise ValueError('web_build_link_refused')
+    root = root.resolve(strict=True)
+    artifacts = Path(artifact_root).absolute().resolve()
+    if artifacts.is_relative_to(root) or root.is_relative_to(artifacts):
+        raise ValueError('web_build_artifact_root_overlap')
+    hashes = manifest.get('sha256') if isinstance(manifest, dict) else None
+    if (not isinstance(hashes, dict) or not 4 <= len(hashes) <= 16
+            or not all(isinstance(name, str) for name in hashes)
+            or not {'index.html', 'audio-worklet.js'} <= hashes.keys()
+            or not any(name.endswith('.js') and name.startswith('assets/') for name in hashes)
+            or not any(name.endswith('.css') and name.startswith('assets/') for name in hashes)
+            or any(not isinstance(name, str) or re.fullmatch(
+                r'(?:index\.html|audio-worklet\.js|assets/[A-Za-z0-9_-]{1,120}\.(?:js|css))', name) is None
+                or not isinstance(value, str) or re.fullmatch(r'[a-f0-9]{64}', value) is None
+                for name, value in hashes.items())):
+        raise ValueError('closed_web_build_manifest_required')
+    if {path.name for path in root.iterdir()} != {'index.html', 'audio-worklet.js', 'assets'}:
+        raise ValueError('web_build_unrelated_entries_refused')
+    assets = root / 'assets'
+    if assets.is_symlink() or assets.is_junction() or not assets.is_dir():
+        raise ValueError('web_build_assets_directory_refused')
+    if {path.name for path in assets.iterdir()} != {name.split('/')[1] for name in hashes if name.startswith('assets/')}:
+        raise ValueError('web_build_unrelated_assets_refused')
+    frozen = {}
+    for name, expected in hashes.items():
+        path = root / name
+        if (path.is_symlink() or path.is_junction() or not path.is_file()
+                or path.stat().st_nlink != 1 or path.stat().st_size > 8_000_000):
+            raise ValueError('web_build_file_refused')
+        with path.open('rb') as stream:
+            raw = stream.read(8_000_001)
+        if len(raw) > 8_000_000 or hashlib.sha256(raw).hexdigest() != expected:
+            raise ValueError('web_build_hash_mismatch')
+        frozen[name] = raw
+    if sum(map(len, frozen.values())) > 16_000_000:
+        raise ValueError('web_build_total_bound')
+
+    class PinnedStaticFiles(StaticFiles):
+        async def get_response(self, path, scope):
+            # StaticFiles normalizes URL components with the host OS separator.
+            path = path.replace('\\', '/')
+            name = 'index.html' if path in {'.', ''} else path
+            if scope['method'] not in {'GET', 'HEAD'}:
+                return Response(status_code=405)
+            if name not in frozen:
+                return Response(status_code=404)
+            return Response(content=b'' if scope['method'] == 'HEAD' else frozen[name],
+                            media_type=mimetypes.guess_type(name)[0] or 'application/octet-stream',
+                            headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+                                     'Content-Length': str(len(frozen[name]))})
+
+    app.mount('/', PinnedStaticFiles(directory=root, html=True), name='pinned-built-web')
+    return dict(hashes)
 
 
 def failure_outcome(code: str) -> str:
@@ -143,6 +211,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     sessions: dict[str, Relay] = {}
     boot_id = "boot-" + secrets.token_hex(12)
     journal: LifecycleJournal | None = None
+    process_metrics = OwnProcessSampler()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -163,10 +232,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
-            for relay in list(sessions.values()):
-                await relay.shutdown("service_restart", outcome="service_restart")
+            try:
+                await process_metrics.aclose()
+            finally:
+                for relay in list(sessions.values()):
+                    await relay.shutdown("service_restart", outcome="service_restart")
 
     app = FastAPI(title=f"Realtime Voice Lab — {settings.mode}", lifespan=lifespan)
+    app.state.process_metrics = process_metrics
 
     @app.middleware('http')
     async def loopback_host_only(request: Request, call_next):
@@ -408,21 +481,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/diagnostics")
     async def diagnostics(request: Request) -> dict[str, object]:
         authorize(request)
-        metrics: dict[str, dict[str, object]] = {
-            name: {"value": None, "observation": "unknown", "unit": unit, "reason": "own-process instrumentation unavailable"}
-            for name, unit in (("rss_bytes", "bytes"), ("open_sockets", "count"), ("open_files", "count"))
-        }
-        try:
-            import psutil
-            process = psutil.Process(os.getpid())
-            readers = {"rss_bytes": lambda: process.memory_info().rss, "open_sockets": lambda: len(process.net_connections(kind="inet")), "open_files": lambda: len(process.open_files())}
-            for name, reader in readers.items():
-                try:
-                    metrics[name] = {"value": reader(), "observation": "observed", "unit": "bytes" if name == "rss_bytes" else "count"}
-                except (psutil.Error, OSError, NotImplementedError):
-                    pass
-        except Exception:
-            pass
+        metrics = await process_metrics.sample()
         metrics["asyncio_tasks"] = {"value": len(asyncio.all_tasks()), "observation": "observed", "unit": "count", "reason": "current server event loop; includes this request"}
         loop = asyncio.get_running_loop()
         expected = loop.time() + 0.01
