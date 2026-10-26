@@ -166,3 +166,37 @@ def test_rehashed_malformed_projection_still_refuses_closed_schema(change):
         return
     assert result['task_admissions'] == []
     assert result['issues']
+
+
+def test_actual_progress_audit_preserves_known_run_for_attempt_conversion():
+    """what_bug_this_catches: hand-authored lineage fixtures hiding omitted producer run IDs."""
+    from voicelab.contracts import VoiceEvent
+    from voicelab.harness.cohort import Progress
+
+    plan, sink = setup()
+    task = plan['tasks'][0]
+    for field in ('cohort', 'family', 'speaker', 'pair_id', 'fixture_id', 'fault_schedule',
+                  'network_profile', 'model_version', 'repeat', 'control'):
+        task.setdefault(field, None)
+    task.update(_session_id='session-0', _server_run_id='observed-run',
+                _trial_namespace='observed-trial-0', _boot_id='boot-a',
+                _wire_turns={'wire-turn': 'planned-0'})
+    progress = Progress(plan, sink)
+    trace = VoiceEvent.model_validate({'run_id': 'observed-run', 'trial_id': 'observed-trial-0',
+        'session_id': 'session-0', 'arm': 'C', 'boot_id': 'boot-a',
+        'logical_turn_id': 'wire-turn', 'transport_turn_id': 'wire-turn',
+        'connection_epoch': 0, 'response_epoch': 0, 'sequence': 0,
+        'kind': 'turn_started', 'timestamp': 1, 'clock_domain': 'server_monotonic_ns'}).model_dump(mode='json')
+    attempt = {'attempt_id': 'attempt-0', 'logical_turn_id': 'wire-turn', 'session_id': 'session-0',
+               'transport_turn_id': 'wire-turn', 'trial_id': 'observed-trial-0',
+               'connection_epoch': 0, 'response_epoch': 0, 'owner_id': 'boot-a',
+               'lineage_observation': 'recorded_at_reservation'}
+    progress.audit(task, [trace], {'session': {'terminal_outcome': None},
+                   'ledger': {'attempts': [attempt]}, 'session_attempts': [attempt]})
+    assert progress.attributed_attempts == {'attempt-0'}
+    emitted = next(e for e in sink.events if e['kind'] == 'attempt_lineage_observed')
+    converted = convert_driver_events(sink.events, plan)
+    assert emitted.get('observed_run_id') == 'observed-run'
+    assert [(r['attempt_id'], r['logical_turn_id']) for r in converted['attempt_correlations']] == [
+        ('attempt-0', 'planned-0')]
+    assert converted['attempt_lineage_unresolved'] == [] and converted['issues'] == []
