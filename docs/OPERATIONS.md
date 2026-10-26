@@ -1,11 +1,13 @@
 # Local operation
 
-PB-M6-R03 runs in Normal mode. The initial source was constructed with static checks
-only; the environment candidate now has a reproducible locked Python install,
-51 collected tests and 48 passing non-browser baseline tests. See
-[validation](VALIDATION.md) for exact commands and scope. A baseline pass is not
-browser, Docker, device, live-provider or independent product acceptance. The
-listener and browser recipes below await joined journey evidence from RV1.
+The pinned offline candidate has 272 passing pytest cases: 155 unit, 112
+CLI/control and five browser, with no failures/errors/skips. The CLI count includes
+108 reporter controls and four arm-journey/trial-plan cases, not 112 voice tasks.
+Two inline public-development checks also pass locally and in network-disabled
+Docker; they are separate from the pytest total. See [validation](VALIDATION.md)
+for exact source identity, build/audit results and evidence limits. Browser tests
+use typed mocks, fake media and test-only same-origin composition. Full soak,
+hardware calibration, live providers, heldout release and product acceptance remain open.
 
 ## Bootstrap and inspect the installed CLI
 
@@ -24,6 +26,14 @@ and validation extras into `.venv` from `uv.lock` using `--locked`. It does not
 change global Python registration, install browser binaries, start listeners or
 enable providers. Do not change an environment another seat has frozen for review;
 make a separate worktree-local locked environment instead.
+
+For non-listening checks use `scripts/ci_validate.py --phase unit --source <checkout>
+--out <fresh-output-directory> --timeout 300` with the installed Python. CLI and
+browser phases require the matching port claim and immediate preflight first;
+the runner otherwise records `not_run`. Exact flags, JUnit count semantics,
+browser setup and the Windows raw-EOL generator caveat are in
+[validation](VALIDATION.md). A reproduced fixture report is not a successful
+saved-artifact CLI read or an independent voice-task oracle.
 
 The following are safe negative checks, not working server/report recipes. Use an
 actually nonexistent receipt path. They return exit 2 before listener/provider
@@ -57,7 +67,7 @@ permissive verifier, diagnostic read-root bypass or heldout/live acceptance.
 
 Claim and check a localhost port with the shared agent-ports registry before serving.
 The CLI accepts an explicit port in 20000–29999 and an existing port-claim receipt;
-PB-M6-R03 authority narrows this to M6-owned 127.0.0.1 ports 22300–22399.
+Use only the project-owned reservation; the current local block is 127.0.0.1 ports 22300–22399.
 Use `voicelab serve --help` for exact arguments. The factory is
 `voicelab.server.app:create_app`; host binding is 127.0.0.1. Keep frontend and relay
 on separately claimed ports. Set `VOICELAB_ALLOWED_ORIGIN` to the frontend's exact
@@ -284,7 +294,7 @@ The additional client `clock_probe` variant has `probe_id` and finite nonnegativ
 The combined clock-probe/legacy-ping allowance is 20 per session. Duplicate probe
 IDs or exhausted allowance end with a protocol error. The browser may calculate a
 bounded clock diagnostic from saved observations, but server receipt/send are not
-browser receipt, speech end or physical audio output. All these paths remain unrun.
+browser receipt, speech end or physical audio output. Selected offline controls are exercised; complete fault-matrix and physical-device coverage remain open.
 
 ## Accounting and boundary completion source
 
@@ -322,8 +332,8 @@ history controls and lease context, plus real dimensioned tariff/usage_bounds/
 usage_units/enforcement_reference and capability/owner evidence. No permissive
 verifier or approved example is installed. The existing supported TTS, licensed K,
 rights/custody/calibration, prices/budget and credentials remain separate prerequisites.
-The new source contracts do not guarantee any external bill. Runtime refusal,
-concurrency, crash atomicity and error-before/after-charge behavior remain untested.
+The new source contracts do not guarantee any external bill. Synthetic refusal/concurrency/accounting checks are exercised; real-provider billing,
+crash atomicity under arbitrary faults and actual error-before/after-charge behavior remain unverified.
 
 GET /admission uses the exact Host/Origin/X-Voicelab-Nonce boundary and returns per-arm
 AdmissionEvidence. Ready.payload.admission and saved session admission use the same
@@ -417,12 +427,12 @@ Explicitly end the phase after probes, including unsuccessful probe cleanup.
 Duplicate IDs preserve original boundaries; expiry/disconnect produces bounded
 calibration failure. Post-End calibration snapshots remain readable and active at
 terminal means incomplete. Missing/failed producer or consumer evidence remains
-unknown; no calibration or other workflow has been run in Dirty Mode.
+unknown; synthetic calibration controls do not establish hardware calibration.
 
 Session evidence.session_attempts is an exact-session projection of the saved
 run ledger, with reservation-time trial/logical/transport/epoch lineage. Old missing
 fields remain unknown; do not guess using matching transport names or whole-run
 snapshot totals. The closed ServerMessage payload registry (contracts.py, see
-contracts/INTERFACES.md) is exercised by the selected Python mock journey baseline.
+contracts/INTERFACES.md) is exercised by the offline Python and built-UI mock checks.
 That is not complete browser/wire coverage; an invalid real frame still ends the
 session as protocol_error.
