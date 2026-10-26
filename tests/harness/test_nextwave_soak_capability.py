@@ -329,4 +329,73 @@ def test_local_producer_refuses_invalid_admission_before_workload(
     handoff = json.loads((args.out / 'observations' / 'handoff.json').read_bytes())
     assert handoff['driver_completed'] is False
     assert handoff['product_acceptance'] is False and handoff['heldout_release'] is False
-    assert not (args.out / 'observations' / 'local-summary.json').exists()
+    # Failed startup may retain diagnostic metadata, never admitted workload/results.
+    # The exact closed shape rejects completed/observed/pass claims at any new key.
+    summary_raw = (args.out / 'observations' / 'local-summary.json').read_bytes()
+    summary = json.loads(summary_raw)
+    assert summary == {
+        'incomplete': ['local_synthetic_incomplete'],
+        'summary': {'full_gate_pass': False, 'product_acceptance': False},
+        'evidence_label': module.LABEL, 'product_acceptance': False,
+    }, 'startup summary must remain incomplete with zero workload and no success metadata'
+    public_raw = (args.out / 'local-synthetic-manifest.json').read_bytes()
+    public = json.loads(public_raw)
+    assert handoff['run_id'] == public['run_id'] == spec['run_id']
+    assert handoff['manifest_hash'] == spec['_manifest_hash'] == hashlib.sha256(public_raw).hexdigest()
+    assert public['mode'] == spec['mode'] == 'mock' and public['split'] == spec['split'] == 'dev'
+    assert public['product_acceptance'] is False and public['external_rights_authority'] is False
+    assert public['web_sha256'] == spec['_web_sha256'] == inputs['manifest']['sha256']
+    for relative, expected in public['generated'].items():
+        assert hashlib.sha256((args.out / relative).read_bytes()).hexdigest() == expected
+    driver_raw = (args.out / 'observations' / 'driver.jsonl').read_bytes()
+    events = [json.loads(raw) for raw in driver_raw.splitlines()]
+    assert len(events) == 1  # No local_synthetic_started/admission/workload event.
+    terminal = events[0]
+    assert terminal['kind'] == 'driver_ended' and terminal['completed'] is False
+    assert terminal['reason'] == 'bounded_driver_step_failed'
+    assert terminal['run_id'] == spec['run_id']
+    assert handoff['counts'] == {'driver_ended': 1}
+    assert handoff['references'] == {
+        'driver': {'path': 'driver.jsonl', 'kind': 'driver_observations',
+                   'sha256': hashlib.sha256(driver_raw).hexdigest()},
+        'local-summary': {'path': 'local-summary.json', 'kind': 'driver_summary',
+                          'sha256': hashlib.sha256(summary_raw).hexdigest()},
+    }
+    provenance = json.loads((args.out / 'local-synthetic-provenance.json').read_bytes())
+    assert provenance['relay_exit_code'] == 0 and provenance['forced_stop'] is False
+    assert provenance['product_acceptance'] is False and provenance['external_rights_authority'] is False
+    artifacts = {row['path']: row for row in provenance['artifacts']}
+    assert {'local-synthetic-manifest.json', 'observations/driver.jsonl',
+            'observations/handoff.json', 'observations/local-summary.json'} <= artifacts.keys()
+    for relative, row in artifacts.items():
+        assert row['evidence_label'] == module.LABEL and row['product_acceptance'] is False
+        assert hashlib.sha256((args.out / relative).read_bytes()).hexdigest() == row['sha256']
+
+
+@pytest.mark.parametrize('false_claim', ['completed', 'observed_turns', 'full_gate_pass'])
+def test_failed_startup_summary_predicate_rejects_false_success_metadata(
+        boundaries, inputs, monkeypatch, false_claim):
+    """what_bug_this_catches: permissive summary existence checks accepting invented success.
+
+    Corrupt only the actual persisted summary at the artifact boundary, then run
+    the full failed-admission control. No workload, process or network is started.
+    """
+    from voicelab.harness.evidence import EvidenceSink
+    original = EvidenceSink.artifact
+    injected = []
+
+    def artifact(sink, name, value, kind):
+        if name == 'local-summary.json':
+            value = deepcopy(value)
+            if false_claim == 'full_gate_pass':
+                value['summary']['full_gate_pass'] = True
+            else:
+                value[false_claim] = True if false_claim == 'completed' else 1
+            injected.append(false_claim)
+        return original(sink, name, value, kind)
+
+    monkeypatch.setattr(EvidenceSink, 'artifact', artifact)
+    with pytest.raises(AssertionError, match='startup summary must remain incomplete'):
+        test_local_producer_refuses_invalid_admission_before_workload(
+            boundaries, inputs, monkeypatch, 'absent')
+    assert injected == [false_claim]
