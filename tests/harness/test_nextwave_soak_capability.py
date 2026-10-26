@@ -10,6 +10,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -173,3 +174,75 @@ def test_static_closed_build_refusal(boundaries, inputs, defect):
         manifest['sha256'].pop('audio-worklet.js')
     with pytest.raises(ValueError):
         mount(FastAPI(), inputs['build'], manifest, artifact_root=runtime)
+
+
+@pytest.mark.parametrize('incomplete, forced', [(False, False), (True, False), (False, True)])
+def test_local_producer_persists_exact_hash_lineage_and_cleanup_status(boundaries, inputs, monkeypatch, incomplete, forced):
+    """what_bug_this_catches: synthetic provenance detaching from bytes or forced stop looking complete.
+
+    Real factory and EvidenceSink; relay process, health response and workload are
+    explicit doubles. This launches no process, listener, browser or actual soak.
+    """
+    from voicelab.harness import browser, soak
+    module, _ = boundaries
+
+    class Stop:
+        stopped = False
+
+        def set(self):
+            self.stopped = True
+
+    stop = Stop()
+
+    class Process:
+        pid = None
+        exitcode = None
+        terminated = False
+
+        def start(self):
+            self.pid = 999999  # synthetic identifier, never an OS process target
+
+        def join(self, timeout):
+            if stop.stopped and (not forced or self.terminated):
+                self.exitcode = 0
+
+        def is_alive(self):
+            return self.pid is not None and self.exitcode is None
+
+        def terminate(self):
+            self.terminated = True
+
+    process = Process()
+    context = SimpleNamespace(Event=lambda: stop, Process=lambda **kwargs: process)
+    monkeypatch.setattr(module.multiprocessing, 'get_context', lambda kind: context)
+    monkeypatch.setattr(browser, 'own_diagnostic', lambda *args: {'mode': 'mock', 'protocol_version': 1})
+
+    async def workload(spec, nonce, sink, profile):
+        assert profile == 'short' and spec['product_acceptance'] is False
+        sink.emit('synthetic_control', evidence_label=module.LABEL, product_acceptance=False)
+        return {'references': {}, 'summary': {'full_gate_pass': False, 'product_acceptance': False},
+                'incomplete': ['controlled-missing-terminal'] if incomplete else []}
+
+    monkeypatch.setattr(soak, 'run_soak', workload)
+    args = SimpleNamespace(out=inputs['root'] / 'fresh-run', port=22341,
+        port_claim=inputs['receipt'], web_dist=inputs['build'],
+        web_manifest=inputs['build_record'], profile='short')
+    module.run_local_synthetic(args)
+    provenance = json.loads((args.out / 'local-synthetic-provenance.json').read_bytes())
+    public_raw = (args.out / 'local-synthetic-manifest.json').read_bytes()
+    public = json.loads(public_raw)
+    handoff = json.loads((args.out / 'observations' / 'handoff.json').read_bytes())
+    assert handoff['run_id'] == public['run_id']
+    assert handoff['manifest_hash'] == hashlib.sha256(public_raw).hexdigest()
+    assert handoff['driver_completed'] is (not incomplete and not forced)
+    assert handoff['product_acceptance'] is False and handoff['heldout_release'] is False
+    assert provenance['product_acceptance'] is False
+    assert provenance['external_rights_authority'] is False
+    assert provenance['forced_stop'] is forced
+    assert stop.stopped and process.exitcode == 0
+    references = {row['path'] for row in provenance['artifacts']}
+    assert {'observations/driver.jsonl', 'observations/handoff.json',
+            'observations/local-summary.json'} <= references
+    for row in provenance['artifacts']:
+        assert row['product_acceptance'] is False and row['evidence_label'] == module.LABEL
+        assert hashlib.sha256((args.out / row['path']).read_bytes()).hexdigest() == row['sha256']
