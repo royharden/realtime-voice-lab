@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+import inspect
 import json
 import time
 
@@ -40,6 +41,8 @@ class Probe:
         self.returncode = None
         self.stdout = self
         self.done = asyncio.Event()
+        self.reader_pending = asyncio.Event()
+        self.wait_calls = 0
         self.terminate_calls = self.kill_calls = 0
 
     async def readline(self):
@@ -47,13 +50,18 @@ class Probe:
         if self.rows:
             return self.rows.popleft()
         if self.blocked and self.returncode is None:
-            await self.done.wait()
+            self.reader_pending.set()
+            try:
+                await self.done.wait()
+            finally:
+                self.reader_pending.clear()
         else:
             self.returncode = 0
             self.done.set()
         return b''
 
     async def wait(self):
+        self.wait_calls += 1
         if not self.blocked and not self.rows and not self.unreapable:
             self.returncode = 0
             self.done.set()
@@ -95,6 +103,125 @@ def rows(clock, values=(1000, 2, 3)):
 def unknown(row):
     assert row['value'] is None and row['observation'] == 'unknown'
     assert isinstance(row.get('reason'), str) and row['reason'].strip()
+
+
+
+# Responsiveness contract: a 10ms heartbeat may have at most 100ms scheduling
+# gap, well below the declared 2s diagnostics cadence. Calibrate eight idle
+# intervals; permit 4x measured jitter with a 60ms floor, but never increase the
+# ceiling to hide an overloaded harness. A 150ms synchronous block must fail.
+HEARTBEAT_INTERVAL = .01
+MAX_HEARTBEAT_GAP = .1
+SAMPLE_ELAPSED_LIMIT = 2.5
+
+
+async def measure_responsiveness(operation, is_pending):
+    calibration = []
+    previous = time.monotonic()
+    for _ in range(8):
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        now = time.monotonic()
+        calibration.append(now - previous)
+        previous = now
+    budget = max(.06, 4 * max(calibration))
+    assert budget <= MAX_HEARTBEAT_GAP, 'heartbeat calibration exceeds declared 100ms ceiling'
+    armed = asyncio.Event()
+    timestamps = []
+    pending_ticks = 0
+    task = None
+
+    async def heartbeat():
+        nonlocal pending_ticks
+        timestamps.append(time.monotonic())
+        armed.set()
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            timestamps.append(time.monotonic())
+            if is_pending() and task is not None and not task.done():
+                pending_ticks += 1
+
+    ticker = asyncio.create_task(heartbeat())
+    await armed.wait()  # independent ticker is armed before operation can block
+    started = time.monotonic()
+    try:
+        task = asyncio.create_task(operation())
+        result = await asyncio.wait_for(task, timeout=SAMPLE_ELAPSED_LIMIT)
+        finished = time.monotonic()
+    finally:
+        ticker.cancel()
+        try:
+            await ticker
+        except asyncio.CancelledError:
+            pass
+    # Include the final interval even if the operation completes before the next tick.
+    timestamps.append(finished)
+    report = {'budget': budget, 'max_gap': max(b - a for a, b in zip(timestamps, timestamps[1:])),
+              'elapsed': finished - started, 'pending_ticks': pending_ticks}
+    return result, report
+
+
+def assert_responsive(report):
+    assert report['max_gap'] <= report['budget'], f"heartbeat gap exceeded budget: {report}"
+    assert report['elapsed'] <= SAMPLE_ELAPSED_LIMIT, f"collection elapsed bound exceeded: {report}"
+    assert report['pending_ticks'] >= 3, f"no repeated heartbeat while reader pending: {report}"
+
+
+def watch_close(monkeypatch, owner, entered=None):
+    """Wrap, rather than replace, the actual sampler shutdown implementation."""
+    actual_close = owner.aclose
+    events = []
+
+    async def close():
+        events.append('entered')
+        if entered is not None:
+            entered.set()
+        try:
+            await actual_close()
+        except BaseException:
+            events.append('failed')
+            raise
+        events.append('completed')
+
+    monkeypatch.setattr(owner, 'aclose', close)
+    return events
+
+
+def assert_sampler_shutdown(owner, events, launches):
+    assert events == ['entered', 'completed'], f"sampler shutdown incomplete: {events}"
+    count = len(launches)
+    result = asyncio.run(owner.sample())  # actual closed sample must refuse relaunch
+    assert len(launches) == count
+    for row in result.values():
+        unknown(row)
+        assert row['reason'] == 'own_process_sampler_closed'
+
+
+def test_heartbeat_oracle_accepts_async_pending_control_and_rejects_sync_block():
+    """what_bug_this_catches: ticks>0 accepting a synchronous 150ms loop block."""
+    async def run():
+        pending = False
+
+        async def control(blocking):
+            nonlocal pending
+            pending = True
+            try:
+                if blocking:
+                    time.sleep(.15)  # bounded intentional broken control; no OS probe
+                else:
+                    await asyncio.sleep(.15)
+            finally:
+                pending = False
+            return 'synthetic'
+
+        positive, asynchronous = await measure_responsiveness(lambda: control(False), lambda: pending)
+        assert positive == 'synthetic'
+        assert_responsive(asynchronous)
+        negative, synchronous = await measure_responsiveness(lambda: control(True), lambda: pending)
+        assert negative == 'synthetic'
+        assert synchronous['max_gap'] >= .15
+        with pytest.raises(AssertionError, match='heartbeat gap exceeded budget'):
+            assert_responsive(synchronous)
+    asyncio.run(run())
 
 
 def test_valid_sampler_positive_cache_expiry_and_no_process_accumulation(monkeypatch):
@@ -188,14 +315,9 @@ def test_blocked_files_reader_keeps_prior_observations_and_loop_progress(monkeyp
     async def run():
         owner, launched, _ = sampler(monkeypatch,
             lambda clock, index: Probe(rows(clock)[:2], blocked=True))
-        task = asyncio.create_task(owner.sample())
-        ticks = 0
-        while not task.done():
-            await asyncio.sleep(.01)
-            ticks += 1
-            assert ticks < 200, 'bounded collection failed to complete'
-        result = await task
-        assert ticks > 0
+        result, responsiveness = await measure_responsiveness(owner.sample,
+            lambda: bool(launched and launched[0].reader_pending.is_set()))
+        assert_responsive(responsiveness)
         assert result['rss_bytes']['value'] == 1000 and result['open_sockets']['value'] == 2
         unknown(result['open_files'])
         assert launched[0].terminate_calls + launched[0].kill_calls > 0
@@ -304,6 +426,8 @@ def test_http_alias_security_cache_and_application_shutdown(monkeypatch, tmp_pat
     nonce = 'synthetic-local-control-nonce-001'
     app = create_app(Settings(nonce=nonce, allowed_origin=origin, artifact_root=tmp_path / 'runtime'))
     headers = {'Origin': origin, 'X-Voicelab-Nonce': nonce}
+    owner = app.state.process_metrics
+    close_events = watch_close(monkeypatch, owner)
     with TestClient(app, base_url=origin) as client:
         assert client.get('/diagnostics').status_code == 403
         assert probes == []
@@ -318,4 +442,134 @@ def test_http_alias_security_cache_and_application_shutdown(monkeypatch, tmp_pat
         assert refused.status_code == 400
         assert refused.json()['error']['code'] == 'evidence_read_empty_object_required'
         assert len(probes) == 1
+        assert close_events == []
     assert all(probe.returncode is not None for probe in probes)
+    assert_sampler_shutdown(owner, close_events, probes)
+
+
+@pytest.mark.parametrize('noop_witness', [False, True])
+def test_shutdown_oracle_rejects_omitted_or_noop_sampler_close(monkeypatch, tmp_path, noop_witness):
+    """what_bug_this_catches: naturally reaped probes hiding skipped/no-op lifespan cleanup."""
+    from fastapi.testclient import TestClient
+    from voicelab.server import metrics
+    from voicelab.server.app import Settings, create_app
+    probes = []
+
+    async def launch(pid):
+        probe = Probe([line(name, value, time.monotonic_ns())
+                       for name, value in zip(NAMES, (1000, 2, 3))])
+        probes.append(probe)
+        return probe
+
+    monkeypatch.setattr(metrics, '_launch_probe', launch)
+    origin = 'http://127.0.0.1:22341'
+    nonce = 'synthetic-local-control-nonce-001'
+    app = create_app(Settings(nonce=nonce, allowed_origin=origin, artifact_root=tmp_path / 'runtime'))
+    owner = app.state.process_metrics
+
+    async def deliberately_noop_close():
+        pass
+
+    monkeypatch.setattr(owner, 'aclose', deliberately_noop_close)
+    events = watch_close(monkeypatch, owner) if noop_witness else []
+    with TestClient(app, base_url=origin) as client:
+        response = client.get('/diagnostics', headers={'Origin': origin, 'X-Voicelab-Nonce': nonce})
+        assert response.status_code == 200
+        assert response.json()['metrics']['rss_bytes']['value'] == 1000
+    assert probes and all(probe.returncode is not None for probe in probes)
+    if noop_witness:
+        assert events == ['entered', 'completed']  # call completion alone is insufficient
+        with pytest.raises(AssertionError):
+            assert_sampler_shutdown(owner, events, probes)
+    else:
+        with pytest.raises(AssertionError, match='sampler shutdown incomplete'):
+            assert_sampler_shutdown(owner, events, probes)
+
+
+def test_application_shutdown_owns_helper_returning_during_close(monkeypatch, tmp_path):
+    """what_bug_this_catches: lifespan failing to await cleanup of a late pending launch."""
+    from fastapi.testclient import TestClient
+    from voicelab.server import metrics
+    from voicelab.server.app import Settings, create_app
+    launch_entered, close_entered, gate = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    probe = Probe([], blocked=True)
+    launches = []
+    returned_after_close = []
+
+    async def launch(pid):
+        launches.append(pid)
+        launch_entered.set()
+        await gate.wait()
+        returned_after_close.append(close_entered.is_set())
+        return probe
+
+    monkeypatch.setattr(metrics, '_launch_probe', launch)
+    app = create_app(Settings(nonce='synthetic-local-control-nonce-001',
+        allowed_origin='http://127.0.0.1:22341', artifact_root=tmp_path / 'runtime'))
+    owner = app.state.process_metrics
+    events = watch_close(monkeypatch, owner, close_entered)
+
+    async def start_pending():
+        request = asyncio.create_task(owner.sample())
+        await asyncio.wait_for(launch_entered.wait(), timeout=2.5)
+
+        async def return_during_shutdown():
+            await asyncio.wait_for(close_entered.wait(), timeout=2.5)
+            await asyncio.sleep(.03)
+            assert probe.returncode is None
+            gate.set()
+
+        return request, asyncio.create_task(return_during_shutdown())
+
+    with TestClient(app) as client:
+        request, releaser = client.portal.call(start_pending)
+        assert len(launches) == 1 and not request.done()
+        assert probe.returncode is None and returned_after_close == []
+    assert returned_after_close == [True]
+    assert request.done() and releaser.done() and releaser.exception() is None
+    assert probe.terminate_calls + probe.kill_calls > 0
+    assert probe.wait_calls > 0 and probe.returncode is not None
+    assert_sampler_shutdown(owner, events, launches)
+
+
+def test_application_shutdown_closes_relays_when_sampler_cleanup_unconfirmed(monkeypatch, tmp_path):
+    """what_bug_this_catches: sampler shutdown failure skipping nested relay cleanup."""
+    from fastapi.testclient import TestClient
+    from voicelab.server import metrics
+    from voicelab.server.app import Settings, create_app
+    probes = []
+
+    async def launch(pid):
+        probe = Probe([], blocked=True, unreapable=True)
+        probes.append(probe)
+        return probe
+
+    monkeypatch.setattr(metrics, '_launch_probe', launch)
+    origin = 'http://127.0.0.1:22341'
+    nonce = 'synthetic-local-control-nonce-001'
+    app = create_app(Settings(nonce=nonce, allowed_origin=origin, artifact_root=tmp_path / 'runtime'))
+    owner = app.state.process_metrics
+    events = watch_close(monkeypatch, owner)
+    relay_calls = []
+
+    class InMemoryRelay:
+        async def shutdown(self, reason, *, outcome):
+            assert events == ['entered', 'failed']
+            await asyncio.sleep(0)  # completion, not merely invocation, is witnessed
+            relay_calls.append((reason, outcome))
+
+    # The app has no public relay injection hook. Access only its lifespan-owned
+    # registry to insert a synthetic relay; no websocket/provider/device is used.
+    sessions = inspect.getclosurevars(app.router.lifespan_context.__wrapped__).nonlocals['sessions']
+    sessions['synthetic-relay'] = InMemoryRelay()
+    with pytest.raises(RuntimeError, match='own_process_probe_cleanup_unconfirmed'):
+        with TestClient(app, base_url=origin) as client:
+            response = client.get('/diagnostics', headers={'Origin': origin, 'X-Voicelab-Nonce': nonce})
+            assert response.status_code == 200
+            for row in response.json()['metrics'].values():
+                unknown(row)
+            assert probes[0].returncode is None  # known unconfirmed double, not fake reaping
+    assert events == ['entered', 'failed']
+    assert relay_calls == [('service_restart', 'service_restart')]
+    assert len(probes) == 1 and probes[0].returncode is None
+    assert probes[0].terminate_calls >= 1 and probes[0].kill_calls >= 1
