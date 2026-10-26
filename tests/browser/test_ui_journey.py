@@ -13,6 +13,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
+import time
 from urllib.parse import urlsplit
 
 import pytest
@@ -29,19 +30,115 @@ PROBE = Path(voicelab.harness.__file__).with_name('probe.js')
 CHROMIUM_ARGS = ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream',
                  '--use-fake-device-for-media-stream']
 
+# Setup actions keep their original Playwright budgets. Observation never retries an action,
+# dispatches a handler, or changes the response/recovery/session deadlines in the application.
+SETUP_ACTION_MS = 4000
+SETUP_OBSERVATION_SECONDS = 0.75
+SETUP_OBSERVER = r''';(()=>{
+  const events=[];
+  const describe=node=>node instanceof Element?{
+    tag:node.tagName,id:node.id,arm:node.getAttribute('data-arm')}:null;
+  const record=(kind,event)=>{
+    if(events.length<80)events.push({kind,at:performance.now(),
+      target:describe(event?.target),trusted:event?.isTrusted??null});
+  };
+  for(const kind of ['DOMContentLoaded','pointerdown','pointerup','mousedown','mouseup','click',
+                     'input','change','visibilitychange'])
+    document.addEventListener(kind,event=>record(kind,event),{capture:true,passive:true});
+  window.addEventListener('load',event=>record('load',event),{once:true,passive:true});
+  Object.defineProperty(window,'__nextwaveSetupEvents',{value:()=>[...events]});
+})();'''
+
+SETUP_SNAPSHOT = r'''selector=>{
+  const read=fn=>{try{return fn();}catch(error){return {unavailable:String(error)};}};
+  const describe=node=>node instanceof Element?{
+    tag:node.tagName,id:node.id,arm:node.getAttribute('data-arm'),
+    classes:node.getAttribute('class')}:null;
+  const nodes=selector?[...document.querySelectorAll(selector)]:[];
+  const node=nodes[0],rect=node?.getBoundingClientRect(),style=node&&getComputedStyle(node);
+  const x=rect?Math.max(0,Math.min(innerWidth-1,rect.x+rect.width/2)):0;
+  const y=rect?Math.max(0,Math.min(innerHeight-1,rect.y+rect.height/2)):0;
+  const hits=rect?document.elementsFromPoint(x,y):[];
+  const navigation=performance.getEntriesByType('navigation')[0];
+  return {
+    at:performance.now(),ready_state:document.readyState,visibility:document.visibilityState,
+    focused:document.hasFocus(),active_element:describe(document.activeElement),
+    dom_content_loaded:{start:navigation?.domContentLoadedEventStart??null,
+      end:navigation?.domContentLoadedEventEnd??null},
+    control:{selector,matches:nodes.length,node:describe(node),connected:node?.isConnected??null,
+      // These are instantaneous DOM observations; Playwright's native action log is authoritative
+      // for its stability/visibility/enabled/receives-events checks during the actual action.
+      dom_visible:!!rect&&rect.width>0&&rect.height>0&&style.visibility!=='hidden'&&style.display!=='none',
+      dom_enabled:node?!node.matches(':disabled')&&node.getAttribute('aria-disabled')!=='true':null,
+      onclick_type:node?typeof node.onclick:null,
+      rect:rect?{x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null,
+      style:style?{display:style.display,visibility:style.visibility,pointer_events:style.pointerEvents}:null,
+      hit_point:rect?{x,y}:null,hit_stack:hits.slice(0,5).map(describe),
+      center_receives_events:node&&hits[0]?node===hits[0]||node.contains(hits[0]):null},
+    state:document.querySelector('#state')?.textContent??null,
+    error:document.querySelector('#error')?.textContent??null,
+    resources:document.querySelector('#resources')?.textContent??null,
+    app:read(()=>window.__voiceLabDiagnostics?.snapshot?.()??null),
+    connection:read(()=>{const driver=window.__voiceLabDriver?.snapshot?.();
+      return driver?{openSockets:driver.openSockets,liveTracks:driver.liveTracks,
+        resumeCount:driver.resumeCount,lastFence:driver.lastFence}:null;}),
+    device_calls:window.__nextwaveDeviceCalls??[],events:window.__nextwaveSetupEvents?.()??[],
+    resources_loaded:performance.getEntriesByType('resource').slice(-16).map(entry=>({
+      name:entry.name.split(/[?#]/)[0],type:entry.initiatorType,start:entry.startTime,
+      duration:entry.duration,response_end:entry.responseEnd}))
+  };
+}'''
+
+
+async def _setup_snapshot(page, selector):
+    """A stalled renderer must not prevent the original control failure being reported."""
+    try:
+        return await asyncio.wait_for(page.evaluate(SETUP_SNAPSHOT, selector),
+                                      timeout=SETUP_OBSERVATION_SECONDS)
+    except Exception as error:
+        return {'unavailable': type(error).__name__ + ': ' + str(error),
+                'page_closed': page.is_closed()}
+
+
+class _SetupDiagnostics:
+    def __init__(self, page):
+        self.page, self.started, self.steps = page, time.monotonic(), []
+
+    async def run(self, stage, selector, action, budget_ms):
+        observing = time.monotonic()
+        step = {'stage': stage, 'selector': selector, 'budget_ms': budget_ms,
+                'before': await _setup_snapshot(self.page, selector)}
+        step['observation_elapsed_ms'] = round((time.monotonic() - observing) * 1000, 3)
+        self.steps.append(step)
+        started = time.monotonic()
+        step['started_ms'] = round((started - self.started) * 1000, 3)
+        try:
+            result = await action()
+        except Exception as error:
+            step['result'] = 'failed'
+            # Playwright includes its complete native actionability/click call log here.
+            step['error'] = type(error).__name__ + ': ' + str(error)
+            raise
+        else:
+            step['result'] = 'completed'
+            return result
+        finally:
+            step['elapsed_ms'] = round((time.monotonic() - started) * 1000, 3)
+
 
 @asynccontextmanager
 async def ui(server: dict, arm: str = 'V', *, device_free: bool = False,
              observer_script: str = ''):
     """Open the real UI, enter relay URL + nonce, pick mock/arm, start, await listening."""
     blocked, console, requests, pageerrors = [], [], [], []
+    setup_failure, setup_error = None, None
     allowed = {server['page_origin'], server['relay_origin']}
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
             headless=True, args=CHROMIUM_ARGS + ['--mute-audio', '--use-file-for-fake-audio-capture=' + server['capture_wav']])
         try:
             context = await browser.new_context(permissions=[] if device_free else ['microphone'])
-            context.set_default_timeout(4000)
+            context.set_default_timeout(SETUP_ACTION_MS)
 
             async def route(request):
                 parsed = urlsplit(request.request.url)
@@ -63,37 +160,84 @@ async def ui(server: dict, arm: str = 'V', *, device_free: bool = False,
                   }
                 })();'''
                 # One script gives a defined guard-before-probe ordering.
-                await context.add_init_script(script=guard + PROBE.read_text(encoding='utf-8') + observer_script)
+                await context.add_init_script(script=guard + PROBE.read_text(encoding='utf-8') +
+                                              observer_script + SETUP_OBSERVER)
             else:
-                await context.add_init_script(script=PROBE.read_text(encoding='utf-8') + observer_script)
+                await context.add_init_script(script=PROBE.read_text(encoding='utf-8') +
+                                              observer_script + SETUP_OBSERVER)
             page = await context.new_page()
+            setup = _SetupDiagnostics(page)
+            browser_events = []
+
+            def observe(kind, detail):
+                if len(browser_events) < 40:
+                    browser_events.append({'kind': kind, 'detail': detail,
+                        'elapsed_ms': round((time.monotonic() - setup.started) * 1000, 3)})
+
             page.on('console', lambda message: console.append(message.text))
             page.on('pageerror', lambda error: pageerrors.append(str(error)))
             page.on('request', lambda request: requests.append((request.method, request.url)))
-            await page.goto(server['page_origin'] + '/', wait_until='domcontentloaded', timeout=10000)
-            await page.locator('#url').fill(server['relay_url'])
-            await page.locator('#nonce').fill(server['nonce'])
-            await page.locator('#mode').select_option('mock')
-            await page.locator(f'[data-arm="{arm}"]').click()
-            # Several <details> exist (stimulus, review, replay); open only the stimulus panel.
-            await page.locator('details:has(#stimulus)').evaluate('(element)=>element.open=true')
-            await page.locator('#start').click()
+            page.on('console', lambda message: observe('console', message.text))
+            page.on('pageerror', lambda error: observe('pageerror', str(error)))
+            page.on('requestfailed', lambda request: observe('requestfailed', {
+                'url': request.url, 'failure': request.failure}))
             try:
-                states = ['listening', 'permission_denied', 'unsupported_audio', 'failed'] if device_free else ['listening']
-                await wait_state(page, states, timeout=8000)
-                assert await page.locator('#state').inner_text() == 'listening'
+                await setup.run('navigate_domcontentloaded', None,
+                    lambda: page.goto(server['page_origin'] + '/', wait_until='domcontentloaded',
+                                      timeout=10000), 10000)
+                await setup.run('fill_relay_url', '#url',
+                    lambda: page.locator('#url').fill(server['relay_url']), SETUP_ACTION_MS)
+                await setup.run('fill_nonce', '#nonce',
+                    lambda: page.locator('#nonce').fill(server['nonce']), SETUP_ACTION_MS)
+                await setup.run('select_mock_mode', '#mode',
+                    lambda: page.locator('#mode').select_option('mock'), SETUP_ACTION_MS)
+                arm_selector = f'[data-arm="{arm}"]'
+                await setup.run('select_arm_' + arm, arm_selector,
+                    lambda: page.locator(arm_selector).click(), SETUP_ACTION_MS)
+                # Preserve the existing panel expansion; the arm/Start interactions stay native.
+                await setup.run('open_stimulus_panel', 'details:has(#stimulus)',
+                    lambda: page.locator('details:has(#stimulus)').evaluate(
+                        '(element)=>element.open=true'), SETUP_ACTION_MS)
+                await setup.run('click_start', '#start',
+                    lambda: page.locator('#start').click(), SETUP_ACTION_MS)
+
+                async def listening():
+                    states = ['listening', 'permission_denied', 'unsupported_audio', 'failed'] if device_free else ['listening']
+                    await wait_state(page, states, timeout=8000)
+                    assert await page.locator('#state').inner_text() == 'listening'
+
+                await setup.run('await_listening', '#state', listening, 8000)
             except Exception as error:
-                diagnostic = await page.evaluate('''()=>({state:document.querySelector('#state')?.textContent,
-                  error:document.querySelector('#error')?.textContent,
-                  resources:document.querySelector('#resources')?.textContent})''')
-                diagnostic['pageerrors'] = pageerrors
-                diagnostic['console'] = console[-10:]
-                diagnostic['device_calls'] = await page.evaluate('()=>window.__nextwaveDeviceCalls??[]')
-                raise AssertionError('UI startup diagnostic: ' +
-                    json.dumps(diagnostic).replace(server['nonce'], '[redacted]')) from error
-            yield page, {'blocked': blocked, 'console': console, 'requests': requests, 'pageerrors': pageerrors}
+                setup_error = error
+                setup_failure = {'steps': setup.steps, 'failed_stage': setup.steps[-1]['stage'],
+                    'failure': type(error).__name__ + ': ' + str(error),
+                    'after_failure': await _setup_snapshot(page, setup.steps[-1]['selector']),
+                    'pageerrors': pageerrors, 'console': console[-10:],
+                    'browser_events': browser_events, 'requests': requests[-16:], 'blocked': blocked,
+                    'observation_budget_ms': SETUP_OBSERVATION_SECONDS * 1000}
+            else:
+                yield page, {'blocked': blocked, 'console': console, 'requests': requests,
+                             'pageerrors': pageerrors, 'setup_steps': setup.steps}
         finally:
-            await browser.close()
+            if setup_failure is not None:
+                setup_failure['cleanup'] = {
+                    'before_close': await _setup_snapshot(page, None),
+                    'browser_connected_before': browser.is_connected(),
+                    'context_pages_before': len(context.pages)}
+            try:
+                await browser.close()
+            except Exception as error:
+                if setup_failure is None:
+                    raise
+                setup_failure['cleanup']['close_error'] = type(error).__name__ + ': ' + str(error)
+            finally:
+                if setup_failure is not None:
+                    setup_failure['cleanup']['browser_connected_after'] = browser.is_connected()
+                    setup_failure['cleanup']['page_closed_after'] = page.is_closed()
+        if setup_error is not None:
+            # Do not chain a raw fill/Playwright exception: its call log may include the nonce.
+            raise AssertionError('UI setup diagnostic: ' +
+                json.dumps(setup_failure).replace(server['nonce'], '[redacted]')) from None
 
 
 async def _raw_trace_download(page) -> str:
