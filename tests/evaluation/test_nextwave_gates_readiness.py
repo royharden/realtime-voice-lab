@@ -171,3 +171,28 @@ def test_cli_blocked_and_invalid_exit_statuses_are_machine_readable(checker):
                            check=False, timeout=20)
     assert human.returncode == 1
     assert 'Product acceptance: false' in human.stdout
+
+
+@pytest.mark.parametrize('number', ['1e999', '-1e999'])
+def test_finite_json_syntax_cannot_overflow_to_nonfinite_metadata(checker, public_inputs, monkeypatch, number):
+    """what_bug_this_catches: parse_constant missing overflow in ordinary exponent syntax.
+
+    A labeled reader double isolates the parser: no filesystem/provenance claim is made.
+    """
+    root, manifest, _ = public_inputs
+    manifest['audio'] = {'synthetic_probe': 'NUMBER_PLACEHOLDER'}
+    raw = json.dumps(manifest).replace('"NUMBER_PLACEHOLDER"', number).encode()
+    monkeypatch.setattr(checker.ArtifactReader, 'read', lambda *args, **kwargs: raw)
+    with pytest.raises(ValueError, match='nonfinite|finite|overflow'):
+        checker.inventory(public_root=root, manifest='run.json', manifest_sha256='0' * 64)
+
+
+def test_finite_exponent_parser_positive_control(checker, public_inputs, monkeypatch):
+    """what_bug_this_catches: an exponent-syntax blanket refusal replacing finite validation."""
+    root, manifest, _ = public_inputs
+    manifest['audio'] = {'synthetic_probe': 'NUMBER_PLACEHOLDER'}
+    raw = json.dumps(manifest).replace('"NUMBER_PLACEHOLDER"', '1e3').encode()
+    monkeypatch.setattr(checker.ArtifactReader, 'read', lambda *args, **kwargs: raw)
+    report = checker.inventory(public_root=root, manifest='run.json', manifest_sha256='0' * 64)
+    assert report['manifest']['pins']['audio']['synthetic_probe'] == 1000
+    assert report['product_acceptance'] is False
