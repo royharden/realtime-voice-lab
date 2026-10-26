@@ -313,6 +313,8 @@ def test_http_alias_security_cache_and_application_shutdown(monkeypatch, tmp_pat
             assert get.json()['metrics'][name] == post.json()['metrics'][name]
         assert get.json()['scope'] == 'own_server_process_only'
         assert app.state.process_metrics is not None
-        assert client.post('/diagnostics', headers=headers, json={'unexpected': True}).status_code == 422
+        refused = client.post('/diagnostics', headers=headers, json={'unexpected': True})
+        assert refused.status_code == 400
+        assert refused.json()['error']['code'] == 'evidence_read_empty_object_required'
         assert len(probes) == 1
     assert all(probe.returncode is not None for probe in probes)
