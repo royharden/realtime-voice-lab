@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -172,12 +174,21 @@ def configure(monkeypatch, fault=None):
     return sink, state
 
 
-def run(monkeypatch, fault=None, profile='full'):
+def run(monkeypatch, fault=None, profile='full', output=None):
     sink, state = configure(monkeypatch, fault)
-    spec = {'run_id': 'synthetic-control', '_manifest_hash': '0' * 64,
+    spec = {'run_id': 'synthetic-control', 'mode': 'mock', '_manifest_hash': '0' * 64,
             '_fixture': {'turns': ['one', 'two', 'three', 'four', 'five'],
                          'audio': {'sha256': '1' * 64}}}
-    return asyncio.run(soak.run_soak(spec, 'unused-test-nonce', sink, profile)), sink, state
+    if output is not None:
+        from voicelab.harness.evidence import EvidenceSink
+        sink = EvidenceSink(output, spec)
+    result = asyncio.run(soak.run_soak(spec, 'unused-test-nonce', sink, profile))
+    if output is not None:
+        reference = sink.artifact('test-summary.json', result, 'driver_summary')
+        sink.close(completed=not result['incomplete'],
+                   reason='incomplete_observation_coverage' if result['incomplete']
+                   else 'driver_schedule_completed', references={'summary': reference})
+    return result, sink, state
 
 
 def test_full_positive_control_counts_executed_effects_and_keeps_acceptance_separate(monkeypatch):
@@ -291,3 +302,30 @@ def test_fourth_refusal_requires_actual_close_and_three_live_admissions(monkeypa
     observation = sink.events[-1]
     assert observation['fourth_session_refused'] is expected
     assert observation['refusal_observation'] == ('observed' if expected else 'unknown')
+
+
+@pytest.mark.parametrize('fault', [None, 'missing_terminal', 'unknown_metric'])
+def test_actual_evidence_projection_retains_resource_rows_and_incomplete_reasons(monkeypatch, tmp_path, fault):
+    """what_bug_this_catches: in-memory checks passing while persisted evidence loses fields."""
+    root = tmp_path / 'owned-synthetic-run'
+    result, _, _ = run(monkeypatch, fault, output=root)
+    handoff = json.loads((root / 'handoff.json').read_bytes())
+    assert handoff['run_id'] == 'synthetic-control' and handoff['manifest_hash'] == '0' * 64
+    assert handoff['product_acceptance'] is False and handoff['heldout_release'] is False
+    assert handoff['driver_completed'] is (fault is None)
+    for reference in handoff['references'].values():
+        assert hashlib.sha256((root / reference['path']).read_bytes()).hexdigest() == reference['sha256']
+    persisted = json.loads((root / 'test-summary.json').read_bytes())
+    assert persisted['incomplete'] == result['incomplete']
+    assert persisted['summary'] == result['summary']
+    observations = json.loads((root / 'soak-observations.json').read_bytes())
+    assert len(observations['samples']) >= 6
+    assert all(set(row['browser_heaps_by_context']) == {'c0', 'c1', 'c2'}
+               for row in observations['samples'])
+    if fault == 'unknown_metric':
+        assert all(row['rss_bytes'] is None for row in observations['samples'])
+    driver = [json.loads(row) for row in (root / 'driver.jsonl').read_bytes().splitlines()]
+    assert [row['sequence'] for row in driver] == list(range(len(driver)))
+    assert all(row['run_id'] == 'synthetic-control' and row['mode'] == 'mock' for row in driver)
+    assert driver[-1]['kind'] == 'driver_ended'
+    assert driver[-1]['completed'] is (fault is None)
