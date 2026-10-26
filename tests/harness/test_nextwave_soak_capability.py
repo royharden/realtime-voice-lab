@@ -215,7 +215,17 @@ def test_local_producer_persists_exact_hash_lineage_and_cleanup_status(boundarie
     process = Process()
     context = SimpleNamespace(Event=lambda: stop, Process=lambda **kwargs: process)
     monkeypatch.setattr(module.multiprocessing, 'get_context', lambda kind: context)
-    monkeypatch.setattr(browser, 'own_diagnostic', lambda *args: {'mode': 'mock', 'protocol_version': 1})
+    diagnostic_paths = []
+
+    def diagnostic(spec, nonce, path):
+        diagnostic_paths.append(path)
+        if path == '/health':
+            return {'mode': 'mock', 'protocol_version': 1}
+        if path == '/admission':
+            return {'arms': {arm: {'run_id': spec['run_id']} for arm in ('V', 'C')}}
+        pytest.fail('unexpected diagnostic request: ' + path)
+
+    monkeypatch.setattr(browser, 'own_diagnostic', diagnostic)
 
     async def workload(spec, nonce, sink, profile):
         assert profile == 'short' and spec['product_acceptance'] is False
@@ -228,6 +238,7 @@ def test_local_producer_persists_exact_hash_lineage_and_cleanup_status(boundarie
         port_claim=inputs['receipt'], web_dist=inputs['build'],
         web_manifest=inputs['build_record'], profile='short')
     module.run_local_synthetic(args)
+    assert {'/health', '/admission'} <= set(diagnostic_paths)
     provenance = json.loads((args.out / 'local-synthetic-provenance.json').read_bytes())
     public_raw = (args.out / 'local-synthetic-manifest.json').read_bytes()
     public = json.loads(public_raw)
