@@ -200,3 +200,20 @@ def test_actual_progress_audit_preserves_known_run_for_attempt_conversion():
     assert [(r['attempt_id'], r['logical_turn_id']) for r in converted['attempt_correlations']] == [
         ('attempt-0', 'planned-0')]
     assert converted['attempt_lineage_unresolved'] == [] and converted['issues'] == []
+
+
+@pytest.mark.parametrize('claim', [None, 'contradictory-run'])
+def test_lineage_run_identity_missing_or_contradictory_stays_unresolved(claim):
+    """what_bug_this_catches: repairing producer compatibility by accepting an unbound run."""
+    plan, sink = setup()
+    lineage(sink)
+    if claim is None:
+        sink.events[-1].pop('observed_run_id')
+    else:
+        sink.events[-1]['observed_run_id'] = claim
+    try:
+        result = convert_driver_events(sink.events, plan)
+    except ValueError:
+        return
+    assert result['attempt_correlations'] == []
+    assert result['attempt_lineage_unresolved'] == ['attempt-0']
