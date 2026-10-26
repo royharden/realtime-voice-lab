@@ -33,7 +33,7 @@ CHROMIUM_ARGS = ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-fo
 @asynccontextmanager
 async def ui(server: dict, arm: str = 'V'):
     """Open the real UI, enter relay URL + nonce, pick mock/arm, start, await listening."""
-    blocked, console, requests = [], [], []
+    blocked, console, requests, pageerrors = [], [], [], []
     allowed = {server['page_origin'], server['relay_origin']}
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
@@ -53,6 +53,7 @@ async def ui(server: dict, arm: str = 'V'):
             await context.add_init_script(path=str(PROBE))
             page = await context.new_page()
             page.on('console', lambda message: console.append(message.text))
+            page.on('pageerror', lambda error: pageerrors.append(str(error)))
             page.on('request', lambda request: requests.append((request.method, request.url)))
             await page.goto(server['page_origin'] + '/', wait_until='domcontentloaded', timeout=10000)
             await page.locator('#url').fill(server['relay_url'])
@@ -62,7 +63,16 @@ async def ui(server: dict, arm: str = 'V'):
             # Several <details> exist (stimulus, review, replay); open only the stimulus panel.
             await page.locator('details:has(#stimulus)').evaluate('(element)=>element.open=true')
             await page.locator('#start').click()
-            await wait_state(page, ['listening'], timeout=8000)
+            try:
+                await wait_state(page, ['listening'], timeout=8000)
+            except Exception as error:
+                diagnostic = await page.evaluate('''()=>({state:document.querySelector('#state')?.textContent,
+                  error:document.querySelector('#error')?.textContent,
+                  resources:document.querySelector('#resources')?.textContent})''')
+                diagnostic['pageerrors'] = pageerrors
+                diagnostic['console'] = console[-10:]
+                raise AssertionError('UI startup diagnostic: ' +
+                    json.dumps(diagnostic).replace(server['nonce'], '[redacted]')) from error
             yield page, {'blocked': blocked, 'console': console, 'requests': requests}
         finally:
             await browser.close()
@@ -89,6 +99,58 @@ async def _listening(page):
 async def _end_and_wait_closed(page):
     await page.locator('#end').click()
     await wait_state(page, ['closed'], timeout=8000)
+
+
+def test_boot_initializes_controls_without_pageerrors(serve):
+    """what_bug_this_catches: null onclick/temporal initialization errors before Start is usable.
+    A rendered page alone is insufficient: required handlers and all panels must initialize.
+    """
+    async def scenario(server):
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                errors = []
+                page.on('pageerror', lambda error: errors.append(str(error)))
+                await page.goto(server['page_origin'], wait_until='networkidle', timeout=10000)
+                assert errors == [], 'boot pageerrors: ' + json.dumps(errors)
+                assert await page.locator('#state').inner_text() == 'idle'
+                for control in ('start', 'end', 'interrupt', 'disconnect', 'retry', 'download'):
+                    assert await page.locator('#' + control).evaluate('(node)=>typeof node.onclick') == 'function'
+                for panel in ('session-evidence', 'review-workbench', 'replay-inspector', 'relay-metadata'):
+                    assert await page.locator('#' + panel).inner_text()
+                assert await page.locator('#replay-inspector [data-rp="raw"]').evaluate(
+                    '(node)=>typeof node.onclick') == 'function'
+                assert await page.locator('#replay-inspector [data-rp="raw-offset"]').count() == 1
+            finally:
+                await browser.close()
+
+    with serve('127.0.0.1') as server:
+        asyncio.run(scenario(server))
+
+
+def test_same_origin_metadata_buttons_use_protected_post_only(serve):
+    """what_bug_this_catches: metadata panels using GET/fallback or posting nonce in a URL."""
+    async def scenario(server):
+        async with ui(server) as (page, seen):
+            for route in ('admission', 'diagnostics'):
+                async with page.expect_response(lambda response: response.url ==
+                                                server['relay_origin'] + '/' + route) as pending:
+                    await page.get_by_test_id(route + '-read').click()
+                response = await pending.value
+                assert response.status == 200
+                assert response.request.method == 'POST'
+                assert response.request.post_data == '{}'
+                assert response.request.headers['x-voicelab-nonce'] == server['nonce']
+                await page.wait_for_function('''()=>document.querySelector(
+                  '[data-testid="relay-metadata-status"]').textContent.startsWith('Received structural metadata')''')
+            assert not any(method == 'GET' and url.endswith(('/admission', '/diagnostics'))
+                           for method, url in seen['requests'])
+            assert server['nonce'] not in page.url
+            await _end_and_wait_closed(page)
+
+    with serve('127.0.0.1') as server:
+        asyncio.run(scenario(server))
 
 
 def test_mock_journey_through_ui_and_post_end_evidence_inspector(serve):
@@ -182,6 +244,12 @@ def test_separate_origin_serving_is_visibly_refused(serve):
                 '()=>document.querySelector("#session-evidence [data-status]").textContent'
                 '.startsWith("Incomplete serving seam")', timeout=4000)
             assert 'Cross-origin evidence reads are refused' in await status.inner_text()
+            for route in ('admission', 'diagnostics'):
+                await page.get_by_test_id(route + '-read').click()
+                await page.wait_for_function('''()=>document.querySelector(
+                  '[data-testid="relay-metadata-status"]').textContent.startsWith('Local metadata unavailable')''')
+            assert not any(method == 'POST' and url.endswith(('/admission', '/diagnostics'))
+                           for method, url in seen['requests'])
             await _end_and_wait_closed(page)
             assert await page.locator('#session-evidence [data-read]').is_disabled()
             cross = await page.evaluate('''async (origin)=>{
