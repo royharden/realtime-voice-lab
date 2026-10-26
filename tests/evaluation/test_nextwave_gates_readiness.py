@@ -22,6 +22,9 @@ def checker():
     path = Path(os.environ.get('M6_READINESS_SOURCE',
                 Path(__file__).resolve().parents[2] / 'scripts' / 'acceptance_readiness.py'))
     assert path.is_absolute() and path.is_file(), 'exact absolute readiness candidate required'
+    expected = os.environ.get('M6_READINESS_SHA256')
+    if expected:
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, 'candidate bytes changed'
     spec = importlib.util.spec_from_file_location('m6_readiness_candidate', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
