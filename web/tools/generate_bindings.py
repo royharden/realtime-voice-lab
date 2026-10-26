@@ -100,11 +100,16 @@ def produce():
         hashes[relative] = hashlib.sha256(raw).hexdigest()
         trees[relative] = ast.parse(raw.decode('utf-8-sig'), filename=relative)
     aliases, constants, candidates, origin, validators = {}, {}, {}, {}, {}
+    http_routes = {}
     review_roles = None
     for relative, tree in trees.items():
         for node in tree.body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                 label = node.targets[0].id
+                if label == 'HTTP_RESPONSE_MODELS':
+                    if not isinstance(node.value, ast.Dict):
+                        raise ValueError('canonical HTTP registry must be a closed dictionary')
+                    http_routes = {static_value(k): name(v) for k, v in zip(node.value.keys, node.value.values)}
                 if isinstance(node.value, ast.Subscript) and name(node.value.value) in {'Annotated','Literal','Union'}:
                     aliases[label] = rule(node.value)
                 elif label.isupper() and isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, str, bool)):
@@ -160,6 +165,8 @@ def produce():
             for child in value:
                 refs(child)
     refs(aliases);refs(classes)
+    if not http_routes or any(model not in classes for model in http_routes.values()):
+        raise ValueError('canonical HTTP route registry unavailable')
     literals = {}
     for label, value in aliases.items():
         if value['kind'] == 'literal':
@@ -182,7 +189,7 @@ def produce():
     for label in sorted(set(aliases) | set(classes)):
         output.append('  '+json.dumps(label)+': '+label+';')
     output.append('}')
-    for label, value in [('SOURCE_HASHES',hashes),('CONSTANTS',constants),('LITERALS',literals),('MODEL_FIELDS',{k:list(v) for k,v in classes.items()}),('CUSTOM_VALIDATORS_UNEXECUTED',validators)]:
+    for label, value in [('HTTP_RESPONSE_MODELS',http_routes),('SOURCE_HASHES',hashes),('CONSTANTS',constants),('LITERALS',literals),('MODEL_FIELDS',{k:list(v) for k,v in classes.items()}),('CUSTOM_VALIDATORS_UNEXECUTED',validators)]:
         output.append('export const '+label+' = '+json.dumps(value,sort_keys=True,ensure_ascii=True,separators=(',',':'))+' as const;')
     output.append('export const SHAPES: Record<string, unknown> = '+json.dumps({**aliases,**{k:{'kind':'model','fields':v} for k,v in classes.items()}},sort_keys=True,ensure_ascii=True,separators=(',',':'))+';')
     output.append('export const MODEL_ORIGINS = '+json.dumps({k:origin[k] for k in classes},sort_keys=True,separators=(',',':'))+' as const;')

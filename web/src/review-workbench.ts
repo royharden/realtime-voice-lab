@@ -31,7 +31,7 @@ export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boole
   const declarations=new Map<string,PlaybackDeclaration>(),declarationPins=new Map<string,string>();
   const drafts=new Map<string,Draft>(),played=new Set<string>(),urls=new Set<string>(),audios=new Set<HTMLAudioElement>(),timers=new Set<ReturnType<typeof setTimeout>>(),rafs=new Set<number>();
   let playing:HTMLAudioElement|undefined,playbackSequence=0;
-  const key=(role:AssetRole)=>`${packet?.items[index]?.item_id??'none'}:${role}`;
+  const key=(role:AssetRole)=>`${packet?.items?.[index]?.item_id??'none'}:${role}`;
   const loadedBytes=()=>[...selected.values()].reduce((total,row)=>total+row.size,0);
   function handles(){return {selected_files:selected.size,selected_bytes:loadedBytes(),pending_reads:pendingReads,pending_bytes:pendingBytes,pending_plays:pendingPlays,audio_elements:audios.size,object_urls:urls.size,timers:timers.size,raf:rafs.size,physical_audio:'unknown'};}
   function showHandles(){q('handles').textContent=JSON.stringify(handles(),null,2);}
@@ -55,7 +55,7 @@ export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boole
     try{const bytes=await file.arrayBuffer();if(own!==generation)throw new Error('Selection was replaced');if(bytes.byteLength!==file.size)throw new Error('Selected file size changed');const hash=await sha256(bytes);if(own!==generation)throw new Error('Selection was replaced');return {bytes,hash};}
     finally{pendingReads--;pendingBytes-=file.size;showHandles();}
   }
-  function currentItem(){return packet?.items[index];}
+  function currentItem(){return packet?.items?.[index];}
   function packetPinned(){return !!packet&&verifiedPacket&&q<HTMLInputElement>('pin').value===packet.packet_hash;}
   function declared(role:Role){const declaration=declarations.get(key(role));if(!declaration||declarationPins.get(key(role))!==declaration.declaration_hash)throw new Error('External canonical declaration pin missing/mismatched for '+role);return declaration;}
   function requirePlayback(role:Role,hash:string){
@@ -157,7 +157,7 @@ export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boole
     const host=q('artifacts');host.replaceChildren();const item=currentItem();if(!item)return;
     for(const role of [...ROLES,'ledger'] as AssetRole[]){
       const row=document.createElement('div');row.className='review-artifact';host.append(row);textNode('h4',role.replaceAll('_',' '),row);
-      const ref=role==='ledger'?undefined:item.artifacts[role];textNode('small',role==='ledger'?'Extra explicitly selected ledger; binds ledger_hash only':ref?ref.path:'Missing reference in packet',row);
+      const ref=role==='ledger'?undefined:item.artifacts[role];textNode('small',role==='ledger'?'Extra explicitly selected ledger; binds ledger_hash only':ref?(ref.path??'Missing reference path'):'Missing reference in packet',row);
       const input=document.createElement('input');input.type='file';input.accept=AUDIO_ROLES.has(role)?'.wav,.pcm16,.pcm,audio/wav,application/octet-stream':'.json,.jsonl,application/json';input.disabled=role!=='ledger'&&!ref;
       input.setAttribute('aria-label','Select exact '+role+' artifact');input.onchange=()=>{const file=input.files?.[0];if(file)void loadArtifact(role,file);};row.append(input);
       textNode('p',assetMessages.get(key(role))??(selected.has(key(role))?'Byte verified':'No selected bytes'),row);
@@ -182,7 +182,7 @@ export function mountReviewWorkbench(root:HTMLElement,options:{canPlay:()=>boole
       const digest=await packetDigest(candidate);if(own!==generation)return;if(digest!==candidate.packet_hash)throw new Error('Packet canonical content digest mismatch');
       packet=candidate;verifiedPacket=true;q<HTMLInputElement>('access').disabled=false;
       q('summary').textContent=JSON.stringify({packet_id:packet.packet_id,packet_hash:packet.packet_hash,run_id:packet.run_id,task_id:packet.task_id,created_at:packet.created_at,split:packet.split,evidence_status:packet.evidence_status,product_acceptance:false,content_digest:'matches; D5 canonical validation/authority still external',source_hashes:packet.source_hashes,gates:packet.gates},null,2);
-      q<HTMLSelectElement>('item').replaceChildren(...packet.items.map((item,i)=>new Option(item.item_id,String(i))));q<HTMLSelectElement>('item').disabled=false;index=0;renderItem();message('Dev packet content digest matches. Enter external pins and explicitly select artifacts/declarations; no correctness is proposed.');
+      q<HTMLSelectElement>('item').replaceChildren(...(packet.items??[]).map((item,i)=>new Option(item.item_id,String(i))));q<HTMLSelectElement>('item').disabled=false;index=0;renderItem();message('Dev packet content digest matches. Enter external pins and explicitly select artifacts/declarations; no correctness is proposed.');
     }catch(error){if(own===generation){packet=undefined;verifiedPacket=false;message(error instanceof Error?error.message:'Packet unavailable');renderItem();}}
   };
   q<HTMLInputElement>('access').onchange=async()=>{
