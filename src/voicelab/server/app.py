@@ -37,6 +37,7 @@ from voicelab.core.task import TaskAuthority, TaskEvidenceUnavailable
 from voicelab.core.trace import TraceWriter, store_pcm
 from voicelab.core.snapshots import read_snapshot, save_snapshot
 from voicelab.security import SecurityRefused, safe_artifact_path, validate_boundary, validate_host, validate_nonce, validate_origin
+from voicelab.server.metrics import OwnProcessSampler
 
 EVIDENCE_LABEL = "keyless mock — diagnostic synthetic tone; no spoken-task acceptance"
 LIVE_EVIDENCE_LABEL = "authorized live source — runtime unverified; independent acceptance pending"
@@ -210,6 +211,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     sessions: dict[str, Relay] = {}
     boot_id = "boot-" + secrets.token_hex(12)
     journal: LifecycleJournal | None = None
+    process_metrics = OwnProcessSampler()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -230,10 +232,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
-            for relay in list(sessions.values()):
-                await relay.shutdown("service_restart", outcome="service_restart")
+            try:
+                await process_metrics.aclose()
+            finally:
+                for relay in list(sessions.values()):
+                    await relay.shutdown("service_restart", outcome="service_restart")
 
     app = FastAPI(title=f"Realtime Voice Lab — {settings.mode}", lifespan=lifespan)
+    app.state.process_metrics = process_metrics
 
     @app.middleware('http')
     async def loopback_host_only(request: Request, call_next):
@@ -475,21 +481,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/diagnostics")
     async def diagnostics(request: Request) -> dict[str, object]:
         authorize(request)
-        metrics: dict[str, dict[str, object]] = {
-            name: {"value": None, "observation": "unknown", "unit": unit, "reason": "own-process instrumentation unavailable"}
-            for name, unit in (("rss_bytes", "bytes"), ("open_sockets", "count"), ("open_files", "count"))
-        }
-        try:
-            import psutil
-            process = psutil.Process(os.getpid())
-            readers = {"rss_bytes": lambda: process.memory_info().rss, "open_sockets": lambda: len(process.net_connections(kind="inet")), "open_files": lambda: len(process.open_files())}
-            for name, reader in readers.items():
-                try:
-                    metrics[name] = {"value": reader(), "observation": "observed", "unit": "bytes" if name == "rss_bytes" else "count"}
-                except (psutil.Error, OSError, NotImplementedError):
-                    pass
-        except Exception:
-            pass
+        metrics = await process_metrics.sample()
         metrics["asyncio_tasks"] = {"value": len(asyncio.all_tasks()), "observation": "observed", "unit": "count", "reason": "current server event loop; includes this request"}
         loop = asyncio.get_running_loop()
         expected = loop.time() + 0.01
