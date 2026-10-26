@@ -135,6 +135,7 @@ class Progress:
                 self.unresolved_attempts.discard(attempt['attempt_id'])
                 self.sink.emit('attempt_lineage_observed', task_id=task['task_id'],
                     attempt_id=attempt['attempt_id'], session_id=lineage[0],
+                    observed_run_id=task['_server_run_id'],
                     observed_logical_turn_id=lineage[1], observed_transport_turn_id=lineage[2],
                     observed_trial_id=attempt['trial_id'], connection_epoch=attempt['connection_epoch'],
                     response_epoch=attempt['response_epoch'], observed_boot_id=attempt['owner_id'])
