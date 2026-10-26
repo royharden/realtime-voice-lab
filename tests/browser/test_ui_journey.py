@@ -31,15 +31,15 @@ CHROMIUM_ARGS = ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-fo
 
 
 @asynccontextmanager
-async def ui(server: dict, arm: str = 'V'):
+async def ui(server: dict, arm: str = 'V', *, device_free: bool = False):
     """Open the real UI, enter relay URL + nonce, pick mock/arm, start, await listening."""
     blocked, console, requests, pageerrors = [], [], [], []
     allowed = {server['page_origin'], server['relay_origin']}
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
-            headless=True, args=CHROMIUM_ARGS + ['--use-file-for-fake-audio-capture=' + server['capture_wav']])
+            headless=True, args=CHROMIUM_ARGS + ['--mute-audio', '--use-file-for-fake-audio-capture=' + server['capture_wav']])
         try:
-            context = await browser.new_context(permissions=['microphone'])
+            context = await browser.new_context(permissions=[] if device_free else ['microphone'])
             context.set_default_timeout(4000)
 
             async def route(request):
@@ -50,7 +50,21 @@ async def ui(server: dict, arm: str = 'V'):
                     blocked.append(request.request.url)
                     await request.abort('blockedbyclient')
             await context.route('**/*', route)
-            await context.add_init_script(path=str(PROBE))
+            if device_free:
+                # Registered before probe.js: even its bound media method must hit this guard.
+                guard = '''(()=>{
+                  window.__nextwaveDeviceCalls=[];
+                  for(const name of ['getUserMedia','enumerateDevices']){
+                    navigator.mediaDevices[name]=async()=>{
+                      window.__nextwaveDeviceCalls.push(name);
+                      throw new DOMException('Device access forbidden in typed mock','NotAllowedError');
+                    };
+                  }
+                })();'''
+                # One script gives a defined guard-before-probe ordering.
+                await context.add_init_script(script=guard + PROBE.read_text(encoding='utf-8'))
+            else:
+                await context.add_init_script(path=str(PROBE))
             page = await context.new_page()
             page.on('console', lambda message: console.append(message.text))
             page.on('pageerror', lambda error: pageerrors.append(str(error)))
@@ -64,16 +78,19 @@ async def ui(server: dict, arm: str = 'V'):
             await page.locator('details:has(#stimulus)').evaluate('(element)=>element.open=true')
             await page.locator('#start').click()
             try:
-                await wait_state(page, ['listening'], timeout=8000)
+                states = ['listening', 'permission_denied', 'unsupported_audio', 'failed'] if device_free else ['listening']
+                await wait_state(page, states, timeout=8000)
+                assert await page.locator('#state').inner_text() == 'listening'
             except Exception as error:
                 diagnostic = await page.evaluate('''()=>({state:document.querySelector('#state')?.textContent,
                   error:document.querySelector('#error')?.textContent,
                   resources:document.querySelector('#resources')?.textContent})''')
                 diagnostic['pageerrors'] = pageerrors
                 diagnostic['console'] = console[-10:]
+                diagnostic['device_calls'] = await page.evaluate('()=>window.__nextwaveDeviceCalls??[]')
                 raise AssertionError('UI startup diagnostic: ' +
                     json.dumps(diagnostic).replace(server['nonce'], '[redacted]')) from error
-            yield page, {'blocked': blocked, 'console': console, 'requests': requests}
+            yield page, {'blocked': blocked, 'console': console, 'requests': requests, 'pageerrors': pageerrors}
         finally:
             await browser.close()
 
