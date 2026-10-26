@@ -436,3 +436,29 @@ snapshot totals. The closed ServerMessage payload registry (contracts.py, see
 contracts/INTERFACES.md) is exercised by the offline Python and built-UI mock checks.
 That is not complete browser/wire coverage; an invalid real frame still ends the
 session as protocol_error.
+
+
+## Mock demonstration preparation
+
+Use `scripts/demo.py` for the prospective two-minute storyboard, not the older
+untimed `voicelab demo` output. With the pinned local Python:
+
+```powershell
+& "$project/.venv/Scripts/python.exe" "$project/scripts/demo.py" --json
+& "$project/.venv/Scripts/python.exe" "$project/scripts/demo.py" --json --out '<new-storyboard.json>'
+```
+
+These commands are metadata-only: no browser, listener, device, fixture read or
+provider starts. Existing output files are refused. Actual duration and recording
+remain unset. The exact actions and capture prerequisites are in [demo](DEMO.md).
+
+Capture waits for independent exact-build V/C interruption, recovery, End and
+cleanup evidence plus the tested approved synthetic launch route. Do not
+substitute a fake rights/read capability to open guarded fixtures. The root serve
+CLI is relay-only; a separate Vite origin is not the test-only same-origin static
+composition. Do not advertise a working capture command until that route exists.
+Use only an owner-claimed/checked loopback listener and an explicitly fake-media
+browser; ordinary Start may request a real microphone and is outside a no-device
+grant. Record achieved outcomes and duration, retain failed artifacts, and keep
+live, heldout, physical-device and independent acceptance labels open. This
+preparation does not revise the final validation counts in [validation](VALIDATION.md).
