@@ -21,6 +21,19 @@ metadata = observed_metadata
 wire_metadata = observed_metadata
 
 
+def _validate_driver_access(spec: dict) -> None:
+    """Separate generated local scope; existing authenticated readers stay strict."""
+    if '_local_synthetic' in spec:
+        from .local_synthetic import LocalSyntheticCapability
+        capability = spec['_local_synthetic']
+        if not isinstance(capability, LocalSyntheticCapability):
+            raise ValueError('local_synthetic_capability_required')
+        capability.validate(spec)
+    else:
+        from voicelab.evaluation.exposure import validate_read_access
+        validate_read_access(spec.get('_artifact_reader'))
+
+
 def own_diagnostic(spec: dict, nonce: str, path: str = '/diagnostics', *, body: dict | None = None) -> dict:
     class NoRedirect(HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -49,8 +62,7 @@ class BrowserDriver:
         self.contexts = []
 
     async def __aenter__(self):
-        from voicelab.evaluation.exposure import validate_read_access
-        validate_read_access(self.spec.get('_artifact_reader'))
+        _validate_driver_access(self.spec)
         if not self.spec.get('_input_wav'):
             raise ValueError('actual reviewed microphone fixture binding required before browser activation')
         # Verify the intended own relay is mock before creating a browser.
@@ -91,9 +103,9 @@ class BrowserDriver:
                     await self.playwright.stop()
 
     async def page(self, task: dict):
-        from voicelab.evaluation.exposure import validate_read_access
-        validate_read_access(self.spec.get('_artifact_reader'))
-        context = await self.browser.new_context(permissions=['microphone'])
+        _validate_driver_access(self.spec)
+        context = await self.browser.new_context(
+            permissions=[] if '_local_synthetic' in self.spec else ['microphone'])
         self.contexts.append(context)
         context.set_default_timeout(4000)
         allowed = urlsplit(self.spec['frontend_url'])

@@ -23,6 +23,8 @@ def main(argv: Sequence[str] | None = None) -> int | None:
     serve.add_argument("--artifact-root", type=Path, default=Path(".agent-work/runtime"))
     serve.add_argument("--allowed-origin", help="Exact registered loopback browser origin")
     serve.add_argument("--mock-fault-policy", type=Path, help="Explicit operator mock-only policy JSON")
+    serve.add_argument("--web-dist", type=Path, help="Explicit closed built-UI directory; relay-only by default")
+    serve.add_argument("--web-manifest", type=Path, help="Bounded JSON build record with exact sha256 inventory")
     delegates = {
         "trial-plan": ("voicelab.evaluation.cli", "plan"),
         "run": ("voicelab.evaluation.cli", "run"),
@@ -64,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int | None:
         # A receipt path is an operator checkpoint, not independent ownership verification.
         # The agent-ports check remains required immediately before actual later activation.
         import uvicorn
-        from voicelab.server.app import Settings, create_app
+        from voicelab.server.app import Settings, create_app, mount_built_web
 
         fault_policy = None
         if args.mock_fault_policy is not None:
@@ -87,8 +89,16 @@ def main(argv: Sequence[str] | None = None) -> int | None:
         )
         from voicelab.runtime_logging import listener_logging_config
 
+        if bool(args.web_dist) != bool(args.web_manifest):
+            parser.error('--web-dist and --web-manifest must be supplied together')
+        app = create_app(settings)
+        if args.web_dist is not None:
+            from voicelab.harness.local_synthetic import _json_record
+            build = _json_record(args.web_manifest)
+            mount_built_web(app, args.web_dist, build, artifact_root=args.artifact_root)
+
         uvicorn.run(
-            create_app(settings), host=args.host, port=args.port,
+            app, host=args.host, port=args.port,
             ws="websockets", ws_max_size=24_000,
             access_log=False, log_level="warning",
             log_config=listener_logging_config(),
