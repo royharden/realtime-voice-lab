@@ -215,7 +215,17 @@ def test_local_producer_persists_exact_hash_lineage_and_cleanup_status(boundarie
     process = Process()
     context = SimpleNamespace(Event=lambda: stop, Process=lambda **kwargs: process)
     monkeypatch.setattr(module.multiprocessing, 'get_context', lambda kind: context)
-    monkeypatch.setattr(browser, 'own_diagnostic', lambda *args: {'mode': 'mock', 'protocol_version': 1})
+    diagnostic_paths = []
+
+    def diagnostic(spec, nonce, path):
+        diagnostic_paths.append(path)
+        if path == '/health':
+            return {'mode': 'mock', 'protocol_version': 1}
+        if path == '/admission':
+            return {'arms': {arm: {'run_id': spec['run_id']} for arm in ('V', 'C')}}
+        pytest.fail('unexpected diagnostic request: ' + path)
+
+    monkeypatch.setattr(browser, 'own_diagnostic', diagnostic)
 
     async def workload(spec, nonce, sink, profile):
         assert profile == 'short' and spec['product_acceptance'] is False
@@ -228,6 +238,7 @@ def test_local_producer_persists_exact_hash_lineage_and_cleanup_status(boundarie
         port_claim=inputs['receipt'], web_dist=inputs['build'],
         web_manifest=inputs['build_record'], profile='short')
     module.run_local_synthetic(args)
+    assert diagnostic_paths == ['/health', '/admission']
     provenance = json.loads((args.out / 'local-synthetic-provenance.json').read_bytes())
     public_raw = (args.out / 'local-synthetic-manifest.json').read_bytes()
     public = json.loads(public_raw)
@@ -246,3 +257,76 @@ def test_local_producer_persists_exact_hash_lineage_and_cleanup_status(boundarie
     for row in provenance['artifacts']:
         assert row['product_acceptance'] is False and row['evidence_label'] == module.LABEL
         assert hashlib.sha256((args.out / row['path']).read_bytes()).hexdigest() == row['sha256']
+
+
+@pytest.mark.parametrize('admission_defect', ['absent', 'wrong-run'])
+def test_local_producer_refuses_invalid_admission_before_workload(
+        boundaries, inputs, monkeypatch, admission_defect):
+    """what_bug_this_catches: healthy relay bypassing missing or foreign-run admission.
+
+    All process/diagnostic/workload boundaries are doubles. A local fake clock
+    expires the readiness deadline immediately; no real sleep or network occurs.
+    """
+    from voicelab.harness import browser, soak
+    module, _ = boundaries
+    stop = SimpleNamespace(stopped=False)
+    stop.set = lambda: setattr(stop, 'stopped', True)
+
+    class Process:
+        pid = None
+        exitcode = None
+        terminated = False
+
+        def start(self):
+            self.pid = 999999  # synthetic identifier, never an OS process target
+
+        def join(self, timeout):
+            if stop.stopped:
+                self.exitcode = 0
+
+        def is_alive(self):
+            return self.pid is not None and self.exitcode is None
+
+        def terminate(self):
+            self.terminated = True
+
+    process = Process()
+    context = SimpleNamespace(Event=lambda: stop, Process=lambda **kwargs: process)
+    monkeypatch.setattr(module.multiprocessing, 'get_context', lambda kind: context)
+    ticks = iter((0, 16))
+    monkeypatch.setattr(module, 'time', SimpleNamespace(
+        monotonic=lambda: next(ticks), sleep=lambda seconds: pytest.fail('unexpected sleep')))
+    diagnostic_paths, observed_specs, workload_calls = [], [], []
+
+    def diagnostic(spec, nonce, path):
+        diagnostic_paths.append(path)
+        observed_specs.append(spec)
+        if path == '/health':
+            return {'mode': 'mock', 'protocol_version': 1}
+        if path == '/admission':
+            if admission_defect == 'absent':
+                return {}
+            return {'arms': {arm: {'run_id': spec['run_id'] + '-foreign'}
+                             for arm in ('V', 'C')}}
+        pytest.fail('unexpected diagnostic request: ' + path)
+
+    async def workload(*args, **kwargs):
+        workload_calls.append(True)
+        pytest.fail('workload must not start without current-run admission')
+
+    monkeypatch.setattr(browser, 'own_diagnostic', diagnostic)
+    monkeypatch.setattr(soak, 'run_soak', workload)
+    args = SimpleNamespace(out=inputs['root'] / 'fresh-run', port=22341,
+        port_claim=inputs['receipt'], web_dist=inputs['build'],
+        web_manifest=inputs['build_record'], profile='short')
+    with pytest.raises(TimeoutError, match='^local_synthetic_relay_start_timeout$'):
+        module.run_local_synthetic(args)
+    assert diagnostic_paths == ['/health', '/admission'] and not workload_calls
+    assert stop.stopped and process.exitcode == 0 and not process.terminated
+    spec = observed_specs[0]
+    with pytest.raises(ValueError, match='local_synthetic_capability_inactive'):
+        spec['_local_synthetic'].validate(spec)
+    handoff = json.loads((args.out / 'observations' / 'handoff.json').read_bytes())
+    assert handoff['driver_completed'] is False
+    assert handoff['product_acceptance'] is False and handoff['heldout_release'] is False
+    assert not (args.out / 'observations' / 'local-summary.json').exists()
