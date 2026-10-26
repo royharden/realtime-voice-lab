@@ -69,9 +69,21 @@ def _index(rows: list[dict], key: str) -> dict[str, dict]:
 
 def _trace_rows(raw: list[dict], manifest: dict, assignment: dict, correlations: list[dict], session_records: list[dict]) -> tuple[list[dict], list[str]]:
     output, issues, sequences, times = [], [], {}, {}
-    mapping = {(r['observed_run_id'], r['observed_trial_id'], r['session_id'],
-                r.get('observed_transport_turn_id') or r.get('observed_logical_turn_id')): r['logical_turn_id']
-               for r in correlations}
+    # Each recovery transport needs its own mapping. A logical parent alone
+    # cannot supply the boot or epochs of the actual observed transport.
+    context = ('observed_run_id', 'observed_trial_id', 'session_id', 'observed_boot_id',
+               'connection_epoch', 'response_epoch', 'observed_transport_turn_id', 'observed_logical_turn_id')
+    mapping, parents = {}, {}
+    for correlation in correlations:
+        if (any(not isinstance(correlation.get(key), str) or not correlation[key]
+                for key in context if key not in {'connection_epoch', 'response_epoch'})
+                or any(type(correlation.get(key)) is not int or correlation[key] < 0
+                       for key in ('connection_epoch', 'response_epoch'))):
+            continue  # Incomplete/sent-only mappings cannot qualify trace facts.
+        identity = tuple(correlation[key] for key in context)
+        mapping.setdefault(identity, set()).add(correlation['logical_turn_id'])
+        parent = identity[:4] + (correlation['observed_logical_turn_id'],)
+        parents.setdefault(parent, set()).add(correlation['logical_turn_id'])
     sessions = {(r['observed_run_id'], r['observed_trial_id'], r['session_id']) for r in correlations}
     sessions.update((r['observed_run_id'], r['observed_trial_id'], r['session_id']) for r in session_records)
     for index, row in enumerate(raw):
@@ -81,25 +93,27 @@ def _trace_rows(raw: list[dict], manifest: dict, assignment: dict, correlations:
             issues.append(f"trace record {index}: malformed canonical event")
             continue
         observed_session = (event['run_id'], event['trial_id'], event['session_id'])
-        turn = mapping.get(observed_session + (event.get('transport_turn_id') or event.get('logical_turn_id'),))
-        original_parent = mapping.get(observed_session + (event.get('logical_turn_id'),))
-        if original_parent is not None:
-            if turn is not None and turn != original_parent:
-                issues.append('recovery transport mapping conflicts with original logical parent')
-            turn = original_parent
-        correlated = turn is not None
-        if not correlated:
-            turn = event['logical_turn_id']
+        identity = observed_session + (event.get('boot_id'), event['connection_epoch'], event['response_epoch'],
+                                       event.get('transport_turn_id'), event.get('logical_turn_id'))
+        targets = mapping.get(identity, set())
+        turn = next(iter(targets)) if len(targets) == 1 else None
+        if len(parents.get(identity[:4] + (event.get('logical_turn_id'),), set())) > 1:
+            issues.append('recovery transport mapping conflicts with original logical parent')
+            turn = None
+        if event['logical_turn_id'] is not None or event['transport_turn_id'] is not None:
+            if turn is None:
+                issues.append(f'trace record {index}: lacks unambiguous exact observed transport context')
         if event["run_id"] != manifest["run_id"] and observed_session not in sessions:
             raise ValueError("trace contains a different run")
         if turn is not None:
             if turn not in assignment:
                 raise ValueError("trace turn outside scheduled denominator")
-            if event['arm'] != assignment[turn]['arm'] or (not correlated and event['trial_id'] != assignment[turn]['trial_id']):
+            if event['arm'] != assignment[turn]['arm']:
                 raise ValueError("trace trial/arm differs from prespecified assignment")
             expected_boot = assignment[turn].get('observed_boot_id')
             if expected_boot is not None and event.get('boot_id') != expected_boot:
                 issues.append('trace boot differs from observed ready mapping')
+                turn = None
         # Internal join key only. Original canonical event IDs remain untouched.
         event['_scheduled_logical_turn_id'] = turn
         key = (event["session_id"], event.get("boot_id"), event["connection_epoch"], event["clock_domain"])
@@ -131,14 +145,20 @@ def _reservation_parents(raw: dict, parents: dict, correlations: list[dict], ass
             if not planned:
                 unresolved.append(identity)
             continue
-        # wire_sent mappings carry no server logical ID; compare it only where observed.
+        # A sent transport ID alone cannot prove the server logical parent.
         matches = [row for row in correlations
                    if row.get("session_id") == attempt.get("session_id")
                    and row.get("observed_trial_id") == attempt.get("trial_id")
+                   and row.get("observed_boot_id") == attempt.get("owner_id")
+                   and all(type(attempt.get(key)) is int and row.get(key) == attempt[key]
+                           for key in ('connection_epoch', 'response_epoch'))
                    and row.get("observed_transport_turn_id") == attempt.get("transport_turn_id")
-                   and row.get("observed_logical_turn_id", attempt["logical_turn_id"]) == attempt["logical_turn_id"]]
+                   and row.get("observed_logical_turn_id") == attempt["logical_turn_id"]]
         targets = {row["logical_turn_id"] for row in matches}
-        if not targets and planned:
+        related = [row for row in correlations
+                   if row.get('session_id') == attempt.get('session_id')
+                   and row.get('observed_transport_turn_id') == attempt.get('transport_turn_id')]
+        if not targets and planned and not related:
             continue  # resolved by unchanged plan identity, not by a join
         if len(targets) != 1 or (planned and targets != {attempt["logical_turn_id"]}):
             unresolved.append(identity)
@@ -149,6 +169,8 @@ def _reservation_parents(raw: dict, parents: dict, correlations: list[dict], ass
                              "observed_run_id": match.get("observed_run_id"), "observed_trial_id": attempt["trial_id"],
                              "session_id": attempt["session_id"], "observed_boot_id": match.get("observed_boot_id"),
                              "observed_transport_turn_id": attempt["transport_turn_id"],
+                             "connection_epoch": attempt["connection_epoch"],
+                             "response_epoch": attempt["response_epoch"],
                              "source": "reservation_lineage"}
     return sorted(unresolved)
 
@@ -168,6 +190,13 @@ def _attempts(raw: dict, assignments: dict, correlations: list[dict],
         if correlation:
             if row['logical_turn_id'] != correlation['observed_logical_turn_id']:
                 raise ValueError('ledger source ID conflicts with observed driver correlation')
+            if row.get('lineage_observation') == 'recorded_at_reservation' and any(
+                    row.get(source) is None or row[source] != correlation.get(target)
+                    for source, target in (
+                        ('trial_id', 'observed_trial_id'), ('session_id', 'session_id'),
+                        ('owner_id', 'observed_boot_id'), ('transport_turn_id', 'observed_transport_turn_id'),
+                        ('connection_epoch', 'connection_epoch'), ('response_epoch', 'response_epoch'))):
+                raise ValueError('ledger reservation lineage conflicts with observed driver correlation')
             row['logical_turn_id'] = correlation['logical_turn_id']
         if row["logical_turn_id"] not in assignments or row["arm"] != assignments[row["logical_turn_id"]]["arm"]:
             raise ValueError("ledger attempt outside run/arm assignment")
@@ -381,11 +410,16 @@ def assemble_evaluation(bundle: dict, artifact_root: str | Path, *,
             parent = {'attempt_id': event['attempt_id'], 'logical_turn_id': turn,
                       'observed_logical_turn_id': event['logical_turn_id'],
                       'observed_run_id': event['run_id'], 'observed_trial_id': event['trial_id'],
-                      'session_id': event['session_id'], 'observed_boot_id': event.get('boot_id')}
+                      'session_id': event['session_id'], 'observed_boot_id': event.get('boot_id'),
+                      'observed_transport_turn_id': event.get('transport_turn_id'),
+                      'connection_epoch': event['connection_epoch'], 'response_epoch': event['response_epoch']}
             old = attempt_parents.get(event['attempt_id'])
             if old and any(old.get(key) != parent[key] for key in ('logical_turn_id', 'observed_logical_turn_id', 'session_id')):
                 raise ValueError('trace/driver attempt-parent lineage conflicts')
-            attempt_parents[event['attempt_id']] = parent
+            if old and any(old.get(key) != parent[key] for key in parent
+                           if key in old and old[key] is not None and parent[key] is not None):
+                raise ValueError('trace/driver attempt-parent lineage conflicts')
+            attempt_parents[event['attempt_id']] = {**(old or {}), **parent}
     raw_ledger = reader.json("ledger", "ledger")
     lineage_unresolved = _reservation_parents(raw_ledger, attempt_parents, conversion['correlations'], assignments)
     conversion['attempt_correlations'] = [attempt_parents[key] for key in sorted(attempt_parents)]

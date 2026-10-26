@@ -110,7 +110,8 @@ class Progress:
                 session_id=event['session_id'], observed_boot_id=event.get('boot_id'),
                 observed_run_id=event['run_id'], observed_trial_id=event['trial_id'],
                 observed_logical_turn_id=event['logical_turn_id'],
-                observed_transport_turn_id=event['transport_turn_id'])
+                observed_transport_turn_id=event['transport_turn_id'],
+                connection_epoch=event['connection_epoch'], response_epoch=event['response_epoch'])
             observed_turns.add((event['session_id'], event['logical_turn_id'],
                 event['transport_turn_id'], event['trial_id'], event.get('connection_epoch'),
                 event.get('response_epoch'), event.get('boot_id')))

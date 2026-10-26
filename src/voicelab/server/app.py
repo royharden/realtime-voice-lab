@@ -211,6 +211,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=403, detail={'code': 'boundary_refused'}) from None
 
+    async def authorized_empty_object(request: Request) -> None:
+        """Same-origin browser reads share one bounded body and boundary policy."""
+        authorize(request)
+        raw = bytearray()
+        try:
+            async with asyncio.timeout(2):
+                async for chunk in request.stream():
+                    if len(raw) + len(chunk) > 32:
+                        raise HTTPException(status_code=413, detail={'code': 'evidence_read_body_bound'})
+                    raw.extend(chunk)
+        except TimeoutError:
+            raise HTTPException(status_code=408, detail={'code': 'evidence_read_body_timeout'}) from None
+        if raw != b'{}':
+            raise HTTPException(status_code=400, detail={'code': 'evidence_read_empty_object_required'})
+
     @app.get('/admission')
     async def configured_admission(request: Request) -> dict[str, object]:
         authorize(request)
@@ -221,6 +236,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 run_manifest_hash=settings.run_manifest_hash, owner_id=boot_id, config=config)
             for arm, config in arms.items()},
             'observation_scope': 'configuration_only_no_provider_probe', 'runtime_verified': False})
+
+    @app.post('/admission')
+    async def browser_admission(request: Request) -> dict[str, object]:
+        await authorized_empty_object(request)
+        return await configured_admission(request)
 
     @app.get("/sessions/{session_id}/evidence")
     async def session_evidence(session_id: str, request: Request) -> dict[str, object]:
@@ -276,18 +296,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post('/sessions/{session_id}/evidence')
     async def browser_session_evidence(session_id: str, request: Request) -> dict[str, object]:
         # Browser-generated Origin on same-origin POST; no forged Origin or CORS waiver.
-        authorize(request)
-        raw = bytearray()
-        try:
-            async with asyncio.timeout(2):
-                async for chunk in request.stream():
-                    if len(raw) + len(chunk) > 32:
-                        raise HTTPException(status_code=413, detail={'code': 'evidence_read_body_bound'})
-                    raw.extend(chunk)
-        except TimeoutError:
-            raise HTTPException(status_code=408, detail={'code': 'evidence_read_body_timeout'}) from None
-        if raw != b'{}':
-            raise HTTPException(status_code=400, detail={'code': 'evidence_read_empty_object_required'})
+        await authorized_empty_object(request)
         # Identical canonical reader and saved snapshot validation; no new counters/totals.
         return await session_evidence(session_id, request)
 
@@ -390,6 +399,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, object]:
         return checked("health", {"mode": settings.mode, "protocol_version": 1, "live_admission": settings.mode == "live", "runtime_verified": False, "evidence_label": evidence_label})
+
+    @app.post('/diagnostics')
+    async def browser_diagnostics(request: Request) -> dict[str, object]:
+        await authorized_empty_object(request)
+        return await diagnostics(request)
 
     @app.get("/diagnostics")
     async def diagnostics(request: Request) -> dict[str, object]:

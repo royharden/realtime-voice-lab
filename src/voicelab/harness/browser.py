@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from voicelab.contracts import parse_server
+
 from .activation import loopback_url, owned_file
 
 
@@ -160,6 +162,10 @@ class BrowserDriver:
                         'ping', 'clock_probe', 'ready', 'state', 'transcript', 'event', 'task', 'error',
                         'ended', 'pong', 'clock_pong'}:
                     raise ValueError('closed wire metadata envelope required')
+                # Validate the actual wire bytes before trusting identities or removing
+                # content. Saved metadata cannot reconstruct redacted PCM/transcripts.
+                if direction == 'received':
+                    parse_server(raw)
                 if direction == 'sent' and isinstance(value, dict) and value.get('type') == 'commit':
                     actual = value.get('turn_id')
                     planned = task.get('_logical_turn_id')
@@ -188,6 +194,13 @@ class BrowserDriver:
                         task['_ended_envelope'] = wire_metadata(value)
                 # Audio payloads never persist in telemetry. Hash references stay intact.
                 clean = wire_metadata(value)
+                validation = None
+                if direction == 'received':
+                    encoded = (json.dumps(clean, sort_keys=True, separators=(',', ':'),
+                                          ensure_ascii=True, allow_nan=False) + '\n').encode()
+                    validation = {'registry': 'server_payload_v1', 'validation': 'passed',
+                                  'metadata_sha256': hashlib.sha256(encoded).hexdigest(),
+                                  'scope': 'producer_wire_validation_before_privacy_projection'}
                 if value.get('type') == 'audio':
                     actual_session = value.get('session_id') or task.get('_session_id')
                     key = (direction, actual_session, value.get('turn_id'), value.get('response_id'),
@@ -208,7 +221,8 @@ class BrowserDriver:
                                logical_turn_id=(task.get('_logical_turn_id') if value.get('type') != 'audio' else None),
                                session_id=task.get('_session_id'),
                                server_trial_namespace=task.get('_trial_namespace'),
-                               message_metadata=clean, browser_clock_observed=False)
+                               message_metadata=clean, wire_validation=validation,
+                               browser_clock_observed=False)
             except (ValueError, TypeError):
                 self.sink.emit('wire_parse_error', task_id=task['task_id'], arm=task['arm'],
                                direction=direction, byte_length=len(raw))
