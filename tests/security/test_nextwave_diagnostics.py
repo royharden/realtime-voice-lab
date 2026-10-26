@@ -232,7 +232,8 @@ def test_unconfirmed_reaping_prevents_relaunch_and_retains_unknowns(monkeypatch)
             for row in result.values():
                 unknown(row)
         assert len(launched) == 1
-        await asyncio.wait_for(owner.aclose(), timeout=2.5)
+        with pytest.raises((RuntimeError, ValueError), match='own_process_probe_cleanup_unconfirmed'):
+            await asyncio.wait_for(owner.aclose(), timeout=2.5)
         assert launched[0].returncode is None  # retained unknown, not fabricated cleanup
     asyncio.run(run())
 
