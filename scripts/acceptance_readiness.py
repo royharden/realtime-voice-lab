@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
+import stat
 import sys
 from pathlib import Path, PureWindowsPath
 
@@ -43,19 +45,29 @@ def _hex(value: str, length: int) -> str:
     return value
 
 
+def _public_component(part: str) -> None:
+    """Apply the same conservative lexical boundary to roots and filenames."""
+    normalized = part.casefold()
+    prohibited = ('credential', 'password', 'secret', 'token', 'ssh', 'holdout', 'heldout')
+    if (not part or part.startswith('.') or part != part.rstrip(' .')
+            or any(ord(char) < 32 or char in '<>:"|?*' for char in part)
+            or PureWindowsPath(part).is_reserved()
+            or normalized in {'gold', 'acceptance', 'auth', 'private'}
+            or any(word in normalized for word in prohibited)):
+        raise ValueError('protected or credential-like metadata path refused')
+
+
 def _public_path(value: str) -> str:
     """Fail before byte access to protected or credential-like path components."""
     if not isinstance(value, str) or not value or '\\' in value or ':' in value:
         raise ValueError('forward-slash public relative JSON path required')
     path = Path(value)
-    if path.is_absolute() or PureWindowsPath(value).drive or '..' in path.parts:
+    windows = PureWindowsPath(value)
+    if path.is_absolute() or windows.drive or windows.root:
         raise ValueError('public relative JSON path required')
-    prohibited = ('credential', 'password', 'secret', 'token', 'ssh', 'holdout', 'heldout')
-    for part in path.parts:
-        normalized = part.casefold()
-        if (part.startswith('.') or normalized in {'gold', 'acceptance', 'auth', 'private'}
-                or any(word in normalized for word in prohibited)):
-            raise ValueError('protected or credential-like metadata path refused')
+    # Split the original spelling so Path normalization cannot hide dot/empty parts.
+    for part in value.split('/'):
+        _public_component(part)
     if path.suffix != '.json':
         raise ValueError('only public JSON metadata can be inspected')
     return value
@@ -74,19 +86,34 @@ def _nonfinite(value):
     raise ValueError('nonfinite JSON value')
 
 
+def _finite_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError('nonfinite JSON exponent overflow')
+    return number
+
+
 def _metadata(root: Path, name: str, sha256: str, kind: str):
     reference = {'path': _public_path(name), 'sha256': _hex(sha256, 64), 'kind': kind}
+    windows = PureWindowsPath(root)
+    if windows.drive.startswith('\\\\') or (windows.drive and not windows.root):
+        raise ValueError('local public root without network/device or drive-relative aliases required')
     # Root itself must not disguise a protected directory or link/reparse component.
     absolute = root.absolute()
+    # Complete lexical checks before any stat, link inspection or reader construction.
+    # Include original parts: absolute() may normalize a protected/../public spelling.
+    for candidate in (root, absolute):
+        parts = candidate.parts[1:] if candidate.anchor else candidate.parts
+        for part in parts:
+            _public_component(part)
     for component in (absolute, *absolute.parents):
-        if component.name:
-            normalized = component.name.casefold()
-            if (component.name.startswith('.') or normalized in {'gold', 'acceptance', 'private', 'heldout'}
-                    or component.is_symlink() or component.is_junction()):
-                raise ValueError('protected or linked public root refused')
+        info = component.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+            raise ValueError('linked or reparse public root refused')
     reader = ArtifactReader(root, {'metadata': reference})
     raw = reader.read('metadata', kind, maximum=2_000_000)
-    value = json.loads(raw, object_pairs_hook=_unique, parse_constant=_nonfinite)
+    value = json.loads(raw, object_pairs_hook=_unique, parse_constant=_nonfinite,
+                       parse_float=_finite_float)
     return value, reference
 
 
@@ -127,6 +154,8 @@ def inventory(*, public_root: Path | None = None, manifest: str | None = None,
         return report
     raw, reference = _metadata(public_root, manifest, manifest_sha256, 'manifest')
     run = RunManifest.model_validate(raw)
+    if len(set(run.scheduled_tasks)) != len(run.scheduled_tasks):
+        raise ValueError('duplicate manifest scheduled task identity')
     report['manifest'] = {'reference': reference, 'pins': run.model_dump(mode='json')}
     report['evidence_label'] = ('public synthetic rehearsal only; not W7/W8 or live acceptance'
                                 if run.mode in {'mock', 'replay'} and run.split == 'dev'
@@ -147,7 +176,8 @@ def inventory(*, public_root: Path | None = None, manifest: str | None = None,
         identities.add(record.trial_id)
         if run.scheduled_tasks and record.trial_id not in run.scheduled_tasks:
             raise ValueError('evidence trial absent from manifest scheduled tasks')
-        if record.observation == 'unknown' and not record.unknown_reason:
+        if (record.observation == 'unknown'
+                and (not record.unknown_reason or not record.unknown_reason.strip())):
             raise ValueError('unknown evidence requires a concrete reason')
         if record.observation != 'unknown' and record.unknown_reason:
             raise ValueError('observed/estimated evidence contradicts unknown reason')

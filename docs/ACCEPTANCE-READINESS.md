@@ -25,6 +25,17 @@ not an authentication mechanism: do not point the tool at secrets or private cus
 material. Hash pins must come from the actual public-artifact owner; the command
 does not obtain rights merely because the pins match.
 
+The same conservative component policy applies to metadata names and every root
+ancestor, before any filesystem inspection or reader construction. Dot-prefixed
+names, `gold`, `acceptance`, `auth`, `private`, and names containing `credential`,
+`password`, `secret`, `token`, `ssh`, `holdout` or `heldout` (case-insensitive) are
+refused. Incidental fragments in ordinary ancestor names are also refused: export
+public metadata to a separately named public directory in that case. Root links and
+reparse points are refused. Metadata paths also refuse Windows drive/root spellings,
+dot/empty components, trailing spaces/dots and ambiguous Windows component characters.
+Windows reserved device components and network/device or drive-relative root aliases
+are refused before filesystem inspection as well.
+
 The manifest uses the existing closed `voicelab.contracts.RunManifest` schema.
 The optional evidence file is a JSON array of existing closed `EvidenceRecord`
 objects. Existing `ArtifactReader` checks exact metadata bytes, size and path
@@ -34,6 +45,12 @@ inconsistent unknown reasons and development custody claims are rejected. Missin
 records, denominators, audio/oracle references and observations remain visible.
 Artifact hashes inside those records are listed only: their bytes are **not** read
 or validated, and the inventory never treats a reference as a successful execution.
+
+Nonfinite checks cover all nested numeric values, including ordinary JSON exponent
+syntax that overflows a float (such as `1e999`); finite exponents remain valid.
+Manifest scheduled task identities must be unique, and an unknown observation must
+give a reason containing non-whitespace text. These checks preserve the supplied
+denominator and make absent observations explicit; they do not resolve acceptance.
 
 Source and tested runtime Git commits are separate operator-declared 40-hex pins.
 They may differ (for example, reviewed documentation after an unchanged runtime).
