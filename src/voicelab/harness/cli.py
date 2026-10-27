@@ -83,7 +83,8 @@ def main(argv: Sequence[str] | None = None, *, authority=None, calibration_provi
         result = run_local_synthetic(args)
         print(json.dumps({'summary': result.get('summary'), 'incomplete': result.get('incomplete'),
                           'evidence_label': result['evidence_label'], 'product_acceptance': False}, allow_nan=False))
-        return 0 if (not result.get('incomplete') and result.get('summary', {}).get('coverage_complete') is True
+        return 0 if (type(result.get('incomplete')) is list and not result['incomplete']
+                     and result.get('summary', {}).get('coverage_complete') is True
                      and (args.profile != 'full' or result['summary'].get('full_gate_pass') is True)) else 1
     if args.operation == 'demo':
         value = {'evidence': 'planned walkthrough; no recording/rehearsal/measured duration', 'steps': DEMO_STEPS}
