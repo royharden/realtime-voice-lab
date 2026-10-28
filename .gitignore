@@ -17,3 +17,13 @@ runtime/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# Keep credentials, archives, and generated files out of the repository
+.creds/
+ArchiveManager-creds.txt
+*.pem
+*.key
+*.p12
+*.pfx
+*.zip
+build/

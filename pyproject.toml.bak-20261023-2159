@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "realtime-voice-lab"
+version = "0.1.0"
+description = "A local, keyless-first comparative voice instrumentation lab"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.115.6",
+  "pydantic==2.10.4",
+  "uvicorn==0.34.0",
+  "websockets==14.1",
+]
+
+[project.optional-dependencies]
+validation = ["playwright==1.49.1", "psutil==6.1.1"]
+
+[project.scripts]
+voicelab = "voicelab.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voicelab"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100

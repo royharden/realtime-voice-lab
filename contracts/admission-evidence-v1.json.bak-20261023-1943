@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:voicelab:admission-evidence:1",
+  "description": "Source reference for canonical contracts.AdmissionEvidence. GET /admission arms and ready/session admission use this shape. Configuration hashes and lease refs are attestations, not independent verification. GET performs no provider probe.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "run_id",
+    "run_manifest_hash",
+    "manifest_hashes",
+    "fingerprint_observation",
+    "requested_models",
+    "expected_returned_models",
+    "actually_returned_models",
+    "requested_voice",
+    "actually_returned_voice",
+    "budget_usd",
+    "budget_owner",
+    "independent_verification"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "mode": {
+      "enum": [
+        "mock",
+        "live"
+      ]
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "minLength": 1,
+      "maxLength": 96
+    },
+    "run_manifest_hash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "manifest_hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilities",
+        "pricing",
+        "authorization",
+        "rights"
+      ],
+      "properties": {
+        "capabilities": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pricing": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "authorization": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rights": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "fingerprint_observation": {
+      "const": "operator_configuration_fingerprint"
+    },
+    "requested_models": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "native",
+          "stt",
+          "tts"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$",
+        "maxLength": 200
+      }
+    },
+    "expected_returned_models": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "native",
+          "stt",
+          "tts"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$",
+        "maxLength": 200
+      }
+    },
+    "actually_returned_models": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "native",
+          "stt",
+          "tts"
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value",
+          "observation",
+          "source"
+        ],
+        "properties": {
+          "value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observation": {
+            "enum": [
+              "observed",
+              "unknown"
+            ]
+          },
+          "source": {
+            "enum": [
+              "provider_session_updated",
+              "unknown"
+            ]
+          }
+        }
+      }
+    },
+    "requested_voice": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$",
+          "maxLength": 200
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "actually_returned_voice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "observation",
+        "source"
+      ],
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observation": {
+          "enum": [
+            "observed",
+            "unknown"
+          ]
+        },
+        "source": {
+          "enum": [
+            "provider_session_updated",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "budget_usd": {
+      "type": "string",
+      "pattern": "^\\d{1,18}(?:\\.\\d{1,18})?$",
+      "maxLength": 37
+    },
+    "budget_owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "owner_id",
+        "lease_reference",
+        "lease_observation",
+        "lease_verified"
+      ],
+      "properties": {
+        "scope": {
+          "enum": [
+            "single_owner_run",
+            "mock_local_run",
+            "unknown"
+          ]
+        },
+        "owner_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "lease_reference": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "lease_observation": {
+          "enum": [
+            "operator_attestation",
+            "unknown"
+          ]
+        },
+        "lease_verified": {
+          "const": "unknown"
+        }
+      }
+    },
+    "independent_verification": {
+      "const": "unknown"
+    }
+  }
+}
